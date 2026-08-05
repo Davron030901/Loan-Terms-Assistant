@@ -297,3 +297,43 @@ def test_pacing_can_be_switched_off(monkeypatch):
     )
     llm.embed_batch(["a", "b"], batch_size=32)
     assert not slept
+
+
+# ── startup warmup ────────────────────────────────────────────────────────────
+def test_warmup_touches_every_configured_chat_provider(monkeypatch):
+    touched: list[str] = []
+    monkeypatch.setattr(
+        llm.OpenAIProvider, "chat",
+        staticmethod(lambda p, **k: touched.append("openai") or "ok"),
+    )
+    monkeypatch.setattr(
+        llm.GeminiProvider, "chat",
+        staticmethod(lambda p, **k: touched.append("gemini") or "ok"),
+    )
+    monkeypatch.setattr(llm.settings, "chat_provider", "openai")
+    monkeypatch.setattr(llm.settings, "chat_fallback_provider", "gemini")
+    monkeypatch.setattr(llm.settings, "embed_provider", "gemini")
+    llm.reset_circuits()
+
+    report = llm.warm_up()
+    assert touched == ["openai", "gemini"]
+    assert all("warm in" in v for v in report.values())
+
+
+def test_warmup_never_raises_and_reports_a_dead_provider(monkeypatch):
+    """Boot must not fail because a key is wrong - the app still serves /api/health."""
+    monkeypatch.setattr(
+        llm.OpenAIProvider, "chat",
+        staticmethod(lambda p, **k: (_ for _ in ()).throw(llm._Fatal("401 invalid key"))),
+    )
+    monkeypatch.setattr(llm.GeminiProvider, "chat", staticmethod(lambda p, **k: "ok"))
+    monkeypatch.setattr(llm.settings, "chat_provider", "openai")
+    monkeypatch.setattr(llm.settings, "chat_fallback_provider", "gemini")
+    monkeypatch.setattr(llm.settings, "embed_provider", "gemini")
+    llm.reset_circuits()
+
+    report = llm.warm_up()
+    assert "unavailable" in report["openai"]
+    assert "warm in" in report["gemini"]
+    # A provider that is dead at boot is skipped on the first real request too.
+    assert llm.provider_health()["openai"] == "cooling down"

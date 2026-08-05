@@ -41,6 +41,14 @@ async def lifespan(app: FastAPI):
             logger.info("index_ready", extra={"points": points})
     except Exception as exc:  # noqa: BLE001 - never block boot on a vector-store probe
         logger.error("index_unreachable", extra={"detail": str(exc)[:200]})
+
+    # Warm the model clients so the first user question does not pay ~9s of TLS and auth.
+    try:
+        from app.core.llm import warm_up
+
+        logger.info("provider_warmup", extra=warm_up())
+    except Exception as exc:  # noqa: BLE001 - warmup is an optimisation, never a gate
+        logger.warning("provider_warmup_failed", extra={"detail": str(exc)[:200]})
     if settings.auto_ingest:
         try:
             from app.rag import ingest, store

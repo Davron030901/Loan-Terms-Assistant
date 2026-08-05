@@ -414,6 +414,39 @@ def chat(prompt: str, *, temperature: float | None = None, max_output_tokens: in
     raise ProviderError(f"All chat providers failed ({', '.join(names)}): {last}")
 
 
+def warm_up() -> dict[str, str]:
+    """Pay the cold-start cost at boot rather than on a user's first question.
+
+    Building the SDK client, resolving DNS, negotiating TLS and authenticating takes
+    several seconds on a fresh worker. A tiny call here moves that off the critical path.
+    A provider that fails to warm is simply reported - it may still work later, and its
+    circuit will be tried on the first real request.
+    """
+    results: dict[str, str] = {}
+    for name in chat_provider_names():
+        started = time.perf_counter()
+        try:
+            _provider(name).chat("ping", temperature=0, max_output_tokens=4)
+            results[name] = f"warm in {int((time.perf_counter() - started) * 1000)}ms"
+        except Exception as exc:  # noqa: BLE001 - never block boot
+            results[name] = f"unavailable: {type(exc).__name__}"
+            # A provider that cannot even be reached at boot should not be tried first on
+            # the next request either.
+            if isinstance(exc, _Fatal):
+                _trip_circuit(name)
+
+    if settings.embed_provider not in chat_provider_names():
+        started = time.perf_counter()
+        try:
+            embed("warm up", task_type=TASK_QUERY)
+            results[f"{settings.embed_provider} (embed)"] = (
+                f"warm in {int((time.perf_counter() - started) * 1000)}ms"
+            )
+        except Exception as exc:  # noqa: BLE001
+            results[f"{settings.embed_provider} (embed)"] = f"unavailable: {type(exc).__name__}"
+    return results
+
+
 def provider_health() -> dict[str, str]:
     """For /api/ready: which providers are currently being skipped."""
     return {

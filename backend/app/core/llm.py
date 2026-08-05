@@ -34,6 +34,18 @@ _RETRYABLE_MARKERS = (
     "deadline", "timeout", "overloaded", "connection", "temporarily",
 )
 
+# The SDK clients are cached for the life of the process, but their underlying transport
+# can die under them - the pipeline runs in asyncio.to_thread workers, and an SDK that
+# manages its own event loop internally will tear the transport down with that loop. The
+# cache then keeps handing back a corpse. Detect it, rebuild, retry.
+_STALE_CLIENT_MARKERS = (
+    "client has been closed",
+    "cannot send a request",
+    "event loop is closed",
+    "attached to a different loop",
+    "client is closed",
+)
+
 # Retrying these is pointless: the key is wrong, revoked, or out of credit. Retrying
 # costs ~10s per call, and a single question makes three chat calls.
 _FATAL_MARKERS = (
@@ -56,13 +68,30 @@ class _Fatal(ProviderError):
     """A configuration failure. Fail over immediately; do not retry."""
 
 
+class _StaleClient(_Retryable):
+    """The cached SDK client is dead. Rebuild it and retry on the same provider."""
+
+
 def _classify(exc: Exception) -> ProviderError:
     text = f"{type(exc).__name__}: {exc}".lower()
+    # Checked first: a dead transport can otherwise be mistaken for a connection error
+    # and retried against the same corpse three times before failing over.
+    if any(marker in text for marker in _STALE_CLIENT_MARKERS):
+        return _StaleClient(str(exc))
     if any(marker in text for marker in _FATAL_MARKERS):
         return _Fatal(str(exc))
     if any(marker in text for marker in _RETRYABLE_MARKERS):
         return _Retryable(str(exc))
     return ProviderError(str(exc))
+
+
+def _handle(provider: Any, exc: Exception) -> ProviderError:
+    """Normalise an SDK exception, dropping the cached client if it has gone stale."""
+    error = _classify(exc)
+    if isinstance(error, _StaleClient):
+        provider.reset_client()
+        logger.info("llm_client_rebuilt", extra={"provider": provider.name})
+    return error
 
 
 def _trip_circuit(name: str) -> None:
@@ -96,6 +125,10 @@ _retry = retry(
 class OpenAIProvider:
     name = "openai"
 
+    @classmethod
+    def reset_client(cls) -> None:
+        cls._client.cache_clear()
+
     @staticmethod
     @lru_cache
     def _client() -> Any:
@@ -123,7 +156,7 @@ class OpenAIProvider:
                 max_tokens=max_output_tokens,
             )
         except Exception as exc:  # noqa: BLE001
-            raise _classify(exc) from exc
+            raise _handle(cls, exc) from exc
         return (response.choices[0].message.content or "").strip()
 
     @classmethod
@@ -141,7 +174,7 @@ class OpenAIProvider:
                 if piece:
                     yield piece
         except Exception as exc:  # noqa: BLE001
-            raise _classify(exc) from exc
+            raise _handle(cls, exc) from exc
 
     @classmethod
     @_retry
@@ -155,13 +188,17 @@ class OpenAIProvider:
                 dimensions=settings.embed_dim,
             )
         except Exception as exc:  # noqa: BLE001
-            raise _classify(exc) from exc
+            raise _handle(cls, exc) from exc
         return [_l2_normalise(list(item.embedding)) for item in response.data]
 
 
 # ── Gemini ────────────────────────────────────────────────────────────────────
 class GeminiProvider:
     name = "gemini"
+
+    @classmethod
+    def reset_client(cls) -> None:
+        cls._client.cache_clear()
 
     @staticmethod
     @lru_cache
@@ -209,7 +246,7 @@ class GeminiProvider:
                 config=cls._config(temperature, max_output_tokens),
             )
         except Exception as exc:  # noqa: BLE001
-            raise _classify(exc) from exc
+            raise _handle(cls, exc) from exc
         return (response.text or "").strip()
 
     @classmethod
@@ -223,7 +260,7 @@ class GeminiProvider:
                 if getattr(chunk, "text", None):
                     yield chunk.text
         except Exception as exc:  # noqa: BLE001
-            raise _classify(exc) from exc
+            raise _handle(cls, exc) from exc
 
     @classmethod
     @_retry
@@ -240,7 +277,7 @@ class GeminiProvider:
                 ),
             )
         except Exception as exc:  # noqa: BLE001
-            raise _classify(exc) from exc
+            raise _handle(cls, exc) from exc
         return [_l2_normalise(list(item.values)) for item in response.embeddings]
 
 
@@ -297,7 +334,8 @@ def chat(prompt: str, *, temperature: float | None = None, max_output_tokens: in
             return result
         except Exception as exc:  # noqa: BLE001
             last = exc
-            _trip_circuit(name)
+            if not isinstance(exc, _StaleClient):
+                _trip_circuit(name)
             remaining = [n for n, _ in live[index + 1 :]]
             logger.warning(
                 "llm_provider_failed",

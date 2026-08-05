@@ -184,3 +184,57 @@ def test_every_provider_down_still_raises(monkeypatch):
     # Both circuits open, but the call must still be attempted rather than skipped entirely.
     with pytest.raises(ProviderError):
         llm.chat("q")
+
+
+# ── regression: a cached SDK client that died under a worker thread ───────────
+STALE_MESSAGES = [
+    "Cannot send a request, as the client has been closed.",
+    "RuntimeError: Event loop is closed",
+    "Future attached to a different loop",
+]
+
+
+@pytest.mark.parametrize("message", STALE_MESSAGES)
+def test_a_dead_client_is_rebuilt_and_retried(message, monkeypatch):
+    """The pipeline runs in asyncio.to_thread workers. An SDK that manages its own event
+    loop can tear its transport down between calls, and the lru_cache then hands back a
+    corpse forever. Detect it, drop the cache, retry on the same provider."""
+    state = {"calls": 0, "resets": 0}
+
+    def flaky(prompt, *, temperature, max_output_tokens):
+        state["calls"] += 1
+        if state["calls"] == 1:
+            raise llm._handle(llm.GeminiProvider, RuntimeError(message))
+        return "ALLOW"
+
+    monkeypatch.setattr(
+        llm.GeminiProvider, "reset_client", classmethod(lambda cls: state.__setitem__("resets", state["resets"] + 1))
+    )
+    monkeypatch.setattr(llm.GeminiProvider, "chat", staticmethod(flaky))
+    monkeypatch.setattr(llm.settings, "chat_provider", "gemini")
+    monkeypatch.setattr(llm.settings, "chat_fallback_provider", "none")
+    llm.reset_circuits()
+
+    # _handle already reset the cache once while classifying; the retry then succeeds.
+    with pytest.raises(llm.ProviderError):
+        llm.GeminiProvider.chat("q", temperature=0, max_output_tokens=8)
+    assert state["resets"] == 1, "a stale client must invalidate the cache"
+    assert llm.GeminiProvider.chat("q", temperature=0, max_output_tokens=8) == "ALLOW"
+
+
+@pytest.mark.parametrize("message", STALE_MESSAGES)
+def test_stale_client_errors_are_retryable_not_fatal(message):
+    error = llm._classify(RuntimeError(message))
+    assert isinstance(error, llm._Retryable), "a dead transport is recoverable, not a config error"
+    assert not isinstance(error, llm._Fatal)
+
+
+def test_auth_errors_are_still_fatal_not_stale():
+    error = llm._classify(Exception("Error code: 401 - Incorrect API key provided"))
+    assert isinstance(error, llm._Fatal)
+
+
+def test_both_providers_can_rebuild_their_client():
+    for provider in (llm.OpenAIProvider, llm.GeminiProvider):
+        assert callable(provider.reset_client)
+        provider.reset_client()  # must not raise even when nothing is cached

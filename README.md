@@ -186,6 +186,7 @@ instead of a crash. A free uptime pinger on `/api/health` every 10 minutes remov
 | Secrets never reach the browser | The frontend has exactly two `NEXT_PUBLIC_*` vars, neither a credential | `frontend/lib/api.ts` |
 | One provider outage isn't an outage | Chat runs OpenAI-first and fails over to Gemini automatically | `core/llm.chat` |
 | A dead provider is not re-tried on every call | 60-second circuit breaker; auth errors are fatal, never retried | `core/llm._trip_circuit` |
+| A dead SDK client heals itself | A closed transport is detected, the cached client dropped, the call retried — and it does not trip the circuit | `core/llm._handle` |
 | A verdict must be terse | `read_verdict` accepts `ALLOW`/`**ALLOW**`/`Answer: ALLOW` but not prose — a verdict buried in a sentence is no verdict | `core/prompts.read_verdict` |
 | Failover can't weaken a guarantee | Both gates run on whatever the fallback wrote, unchanged | `agent/pipeline.py` |
 | Vector spaces are never mixed | Embeddings are pinned to one provider and stamped on every point; a mismatch raises | `core/llm.embed_batch`, `rag/retrieve.py` |

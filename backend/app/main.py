@@ -22,6 +22,25 @@ logger = configure_logging(settings.log_level)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("startup", extra={"settings": settings.redacted()})
+
+    # An unindexed collection is the most common cause of "it answers nothing" - and it
+    # looks identical to a working system from the outside. Check once, and shout.
+    try:
+        from app.rag import store
+
+        points = store.count()
+        if points == 0:
+            logger.error(
+                "index_is_empty",
+                extra={
+                    "action": "run: python -m scripts.ingest_all --all --recreate",
+                    "consequence": "every question will return 'Not stated in the terms.'",
+                },
+            )
+        else:
+            logger.info("index_ready", extra={"points": points})
+    except Exception as exc:  # noqa: BLE001 - never block boot on a vector-store probe
+        logger.error("index_unreachable", extra={"detail": str(exc)[:200]})
     if settings.auto_ingest:
         try:
             from app.rag import ingest, store

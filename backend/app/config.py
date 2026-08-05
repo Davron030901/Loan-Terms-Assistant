@@ -15,7 +15,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 
-_SECRET_KEYS = ("api_key", "secret", "token", "password")
+# Matched as whole trailing words, so "verdict_max_tokens" is not mistaken for a secret.
+_SECRET_SUFFIXES = ("api_key", "secret", "password", "auth_token", "access_token")
 
 
 class Settings(BaseSettings):
@@ -179,7 +180,7 @@ class Settings(BaseSettings):
         """Settings safe to write to a log line."""
         out: dict[str, object] = {}
         for name, value in self.model_dump().items():
-            if any(k in name for k in _SECRET_KEYS) and value:
+            if any(name.endswith(suffix) for suffix in _SECRET_SUFFIXES) and value:
                 out[name] = f"***set*** (len={len(str(value))})"
             else:
                 out[name] = str(value) if isinstance(value, Path) else value

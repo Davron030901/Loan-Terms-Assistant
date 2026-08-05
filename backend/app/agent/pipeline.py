@@ -87,7 +87,17 @@ def _run(question: str, doc_id: str) -> ChatResponse:
 
     # ── 2. RETRIEVE ──────────────────────────────────────────────────────────
     t0 = time.perf_counter()
+    logger.info("retrieval_start", extra={"doc_id": doc_id})
     chunks = retrieve.search(question, doc_id=doc_id)
+    logger.info(
+        "retrieval_done",
+        extra={
+            "chunks": len(chunks),
+            "top_score": round(max((c.score for c in chunks), default=0.0), 4),
+            "pages": sorted({c.page for c in chunks}),
+            "latency_ms": int((time.perf_counter() - t0) * 1000),
+        },
+    )
     trace.retrieval = RetrievalTrace(
         chunks=len(chunks),
         top_score=round(max((c.score for c in chunks), default=0.0), 4),
@@ -101,7 +111,12 @@ def _run(question: str, doc_id: str) -> ChatResponse:
 
     # ── 3. ANSWER ────────────────────────────────────────────────────────────
     t0 = time.perf_counter()
+    logger.info("answer_start", extra={"model": settings.gemini_chat_model})
     draft = answer_mod.write(question, chunks)
+    logger.info(
+        "answer_done",
+        extra={"chars": len(draft), "latency_ms": int((time.perf_counter() - t0) * 1000)},
+    )
     repaired = False
 
     if citations_mod.is_not_stated(draft):
@@ -138,6 +153,7 @@ def _run(question: str, doc_id: str) -> ChatResponse:
         return finish("blocked_not_grounded", prompts.BLOCKED_MESSAGE, chunks=chunks)
 
     # ── 4. OUTPUT GATE ───────────────────────────────────────────────────────
+    logger.info("grounding_start")
     grounding = verify.is_grounded(draft, chunks)
     trace.grounding_guard = GroundingTrace(
         verdict="GROUNDED" if grounding.grounded else "NOT_GROUNDED",

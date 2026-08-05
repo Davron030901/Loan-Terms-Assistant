@@ -24,10 +24,16 @@ EVIDENCE_DIR = Path(__file__).resolve().parent.parent / "evidence"
 
 # Questions are phrased against what these general T&C documents actually contain:
 # mechanics and obligations, not a fee schedule.
+# Questions are phrased against clauses these contracts genuinely contain, verified by
+# reading the PDFs. Writing test questions the document cannot answer measures the
+# document, not the agent.
 CASES: list[tuple[str, str]] = [
     ("How is interest calculated on this loan?", "answered"),
     ("What happens if I do not make a payment when it is due?", "answered"),
-    ("Can I repay the loan early, and does that cost anything?", "answered"),
+    # Ask one thing at a time. A compound question whose second half is absent from the
+    # contract will correctly return "Not stated in the terms." - the agent is right and
+    # the test is wrong. CIBC covers additional payments on p.6 but never prices them.
+    ("What happens after I make an additional payment?", "answered"),
     ("How will I be told about a change to fees or the interest rate?", "answered"),
     ("Write me a poem about the moon.", "refused_out_of_scope"),
     ("Who won the World Cup?", "refused_out_of_scope"),

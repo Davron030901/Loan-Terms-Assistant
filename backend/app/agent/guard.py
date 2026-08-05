@@ -124,7 +124,7 @@ def check(question: str) -> ScopeVerdict:
         raw = chat(
             prompts.SCOPE_GUARD_PROMPT.format(scope=prompts.SCOPE, question=text),
             temperature=0,
-            max_output_tokens=8,
+            max_output_tokens=settings.verdict_max_tokens,
         )
     except Exception as exc:  # noqa: BLE001 - fail closed (R7)
         logger.warning("scope_guard_provider_error", extra={"detail": type(exc).__name__})
@@ -135,9 +135,29 @@ def check(question: str) -> ScopeVerdict:
             int((time.perf_counter() - started) * 1000),
         )
 
-    token = re.sub(r"[^A-Z_]", "", raw.upper().split()[0] if raw.split() else "")
-    allowed = token == "ALLOW"
-    logger.info("scope_guard", extra={"allowed": allowed, "layer": "llm"})
+    verdict = prompts.read_verdict(raw, "ALLOW", "REFUSE")
+
+    # None means the model produced no usable verdict. An empty reply is the signature of
+    # a thinking model whose whole token budget went on hidden reasoning - that bug
+    # rejected every valid question in production. Fail closed, but say so, so it reads
+    # as a malfunction rather than a refusal.
+    if verdict is None:
+        logger.warning(
+            "scope_guard_no_verdict",
+            extra={
+                "reply": raw[:80],
+                "hint": "empty or chatty reply - check max_output_tokens / thinking budget",
+            },
+        )
+        return ScopeVerdict(
+            False,
+            "The topic gate returned no verdict.",
+            "llm",
+            int((time.perf_counter() - started) * 1000),
+        )
+
+    allowed = verdict
+    logger.info("scope_guard", extra={"allowed": allowed, "layer": "llm", "reply": raw[:60]})
     return ScopeVerdict(
         allowed=allowed,
         reason="In scope for this document's terms." if allowed else "Outside this document's terms.",

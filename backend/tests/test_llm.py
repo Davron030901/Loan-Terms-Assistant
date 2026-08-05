@@ -128,3 +128,59 @@ def test_search_refuses_a_mismatched_index(monkeypatch):
     )
     with pytest.raises(RetrievalError, match="--recreate"):
         retrieve.search("q", doc_id="cibc_personal")
+
+
+# ── regressions from the first live deployment ────────────────────────────────
+def test_auth_failures_are_fatal_and_not_retried(monkeypatch):
+    """A revoked key is not a transient outage. Retrying it cost ~10s per call, and a
+    single question makes three chat calls."""
+    attempts = {"n": 0}
+
+    def dead_key(prompt, *, temperature, max_output_tokens):
+        attempts["n"] += 1
+        raise llm._classify(Exception("Error code: 401 - Incorrect API key provided"))
+
+    monkeypatch.setattr(llm.OpenAIProvider, "chat", staticmethod(dead_key))
+    monkeypatch.setattr(llm.GeminiProvider, "chat", staticmethod(lambda *a, **k: "ALLOW"))
+    llm.reset_circuits()
+
+    assert llm.chat("q") == "ALLOW"
+    assert attempts["n"] == 1, "an auth error must fail over immediately, not retry"
+
+
+def test_a_failed_provider_is_skipped_on_the_next_call(monkeypatch):
+    """Without a circuit breaker every call re-pays the failover penalty."""
+    tried: list[str] = []
+
+    def broken(prompt, *, temperature, max_output_tokens):
+        tried.append("openai")
+        raise ProviderError("openai down")
+
+    monkeypatch.setattr(llm.OpenAIProvider, "chat", staticmethod(broken))
+    monkeypatch.setattr(llm.GeminiProvider, "chat", staticmethod(lambda *a, **k: "ALLOW"))
+    llm.reset_circuits()
+
+    llm.chat("first")   # pays the penalty once
+    llm.chat("second")  # must not touch OpenAI again
+    llm.chat("third")
+    assert tried == ["openai"], f"OpenAI retried while cooling down: {tried}"
+    assert llm.provider_health()["openai"] == "cooling down"
+
+
+def test_a_recovered_provider_clears_its_circuit(monkeypatch):
+    llm.reset_circuits()
+    monkeypatch.setattr(llm.OpenAIProvider, "chat", staticmethod(lambda *a, **k: "ALLOW"))
+    monkeypatch.setattr(llm.GeminiProvider, "chat", staticmethod(lambda *a, **k: "REFUSE"))
+    assert llm.chat("q") == "ALLOW"
+    assert llm.provider_health()["openai"] == "ok"
+
+
+def test_every_provider_down_still_raises(monkeypatch):
+    llm.reset_circuits()
+    monkeypatch.setattr(llm.OpenAIProvider, "chat", staticmethod(lambda *a, **k: (_ for _ in ()).throw(ProviderError("a"))))
+    monkeypatch.setattr(llm.GeminiProvider, "chat", staticmethod(lambda *a, **k: (_ for _ in ()).throw(ProviderError("b"))))
+    with pytest.raises(ProviderError):
+        llm.chat("q")
+    # Both circuits open, but the call must still be attempted rather than skipped entirely.
+    with pytest.raises(ProviderError):
+        llm.chat("q")

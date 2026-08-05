@@ -470,6 +470,9 @@ get suspended, reactivate it in the dashboard and re-run `ingest_all` if the dat
 | Service crash-loops on boot | `AUTO_INGEST=true` | Set it to `false`. Never ingest during startup on the free tier |
 | `Vector dimension error` on ingest | Collection built at a different size | `python -m scripts.ingest_all --all --recreate` with `EMBED_DIM=768` |
 | 429 from Gemini during ingest | Free-tier per-minute limit | Harmless — tenacity retries with backoff. Let it run |
+| **Every question is refused, including obviously valid ones** | `gemini-2.5-*` are thinking models: hidden reasoning tokens come out of the same `max_output_tokens` budget, so a short budget returns empty text — and a fail-closed guard reads empty as REFUSE | Fixed in code: `GEMINI_DISABLE_THINKING=true` and `VERDICT_MAX_TOKENS=32`. Look for `scope_guard_no_verdict` in the logs |
+| **Answers take 15–25 seconds** | The primary chat provider is failing, and each question makes three chat calls — so the failover penalty was paid three times | Fixed by the circuit breaker: a failed provider is skipped for 60 s. Check `curl $API/api/ready` → `provider_health` |
+| `llm_provider_failed` with `"fatal": true` | The key is revoked, wrong, or out of credit — not a transient outage | Replace the key, or set `CHAT_PROVIDER=gemini` and `CHAT_FALLBACK_PROVIDER=none` |
 | Answers still work after OpenAI billing lapses | Chat failed over to Gemini — check the logs for `llm_provider_failed` | Working as designed. `/api/ready` shows the active chain |
 | `RetrievalError: The index was built with '…' but EMBED_PROVIDER now resolves to '…'` | You changed the embedding provider without re-indexing | `python -m scripts.ingest_all --all --recreate` |
 | Every answer is wrong but nothing errors | Almost certainly a mixed vector space | `curl $API/api/ready` and compare `embed_model` against what you ingested with |

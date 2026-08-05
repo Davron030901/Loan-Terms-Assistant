@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass
 from typing import Literal
 
+from app.config import settings
 from app.core import prompts
 from app.core.llm import chat
 from app.core.logging import logger
@@ -97,14 +98,19 @@ def is_grounded(answer: str, chunks: list[Chunk]) -> GroundingVerdict:
         raw = chat(
             prompts.GROUNDING_PROMPT.format(context=context, answer=answer),
             temperature=0,
-            max_output_tokens=8,
+            max_output_tokens=settings.verdict_max_tokens,
         )
     except Exception as exc:  # noqa: BLE001 - fail closed (R7)
         logger.warning("grounding_provider_error", extra={"detail": type(exc).__name__})
         return GroundingVerdict(False, "llm", "The verifier could not be reached.", elapsed())
 
-    upper = raw.upper()
-    grounded = "NOT_GROUNDED" not in upper and "GROUNDED" in upper
+    # NOT_GROUNDED is checked first: it contains "GROUNDED" as a substring, so word-level
+    # parsing is the only safe way to read it.
+    verdict = prompts.read_verdict(raw, "GROUNDED", "NOT_GROUNDED")
+    if verdict is None:
+        logger.warning("grounding_no_verdict", extra={"reply": raw[:80]})
+        return GroundingVerdict(False, "llm", "The verifier returned no verdict.", elapsed())
+    grounded = verdict
     logger.info("grounding_guard", extra={"grounded": grounded, "method": "llm"})
     return GroundingVerdict(
         grounded=grounded,

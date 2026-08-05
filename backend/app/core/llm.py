@@ -34,16 +34,47 @@ _RETRYABLE_MARKERS = (
     "deadline", "timeout", "overloaded", "connection", "temporarily",
 )
 
+# Retrying these is pointless: the key is wrong, revoked, or out of credit. Retrying
+# costs ~10s per call, and a single question makes three chat calls.
+_FATAL_MARKERS = (
+    "401", "403", "invalid_api_key", "incorrect api key", "invalid api key",
+    "unauthorized", "permission_denied", "api key not valid",
+    "insufficient_quota", "billing", "account is not active",
+)
+
+# How long to skip a provider after it fails, so the failover penalty is paid once
+# rather than on every call.
+CIRCUIT_OPEN_SECONDS = 60.0
+_unhealthy_until: dict[str, float] = {}
+
 
 class _Retryable(ProviderError):
     """A transient provider failure, worth retrying on the same provider."""
 
 
+class _Fatal(ProviderError):
+    """A configuration failure. Fail over immediately; do not retry."""
+
+
 def _classify(exc: Exception) -> ProviderError:
     text = f"{type(exc).__name__}: {exc}".lower()
+    if any(marker in text for marker in _FATAL_MARKERS):
+        return _Fatal(str(exc))
     if any(marker in text for marker in _RETRYABLE_MARKERS):
         return _Retryable(str(exc))
     return ProviderError(str(exc))
+
+
+def _trip_circuit(name: str) -> None:
+    _unhealthy_until[name] = time.monotonic() + CIRCUIT_OPEN_SECONDS
+
+
+def _circuit_open(name: str) -> bool:
+    return time.monotonic() < _unhealthy_until.get(name, 0.0)
+
+
+def reset_circuits() -> None:
+    _unhealthy_until.clear()
 
 
 def _l2_normalise(vector: list[float]) -> list[float]:
@@ -152,11 +183,21 @@ class GeminiProvider:
     def _config(temperature: float, max_output_tokens: int) -> Any:
         from google.genai import types
 
-        return types.GenerateContentConfig(
-            temperature=temperature,
-            max_output_tokens=max_output_tokens,
-            candidate_count=1,
-        )
+        kwargs: dict[str, Any] = {
+            "temperature": temperature,
+            "max_output_tokens": max_output_tokens,
+            "candidate_count": 1,
+        }
+        # gemini-2.5-* are thinking models: reasoning tokens come out of the SAME
+        # budget as the answer. A short budget is spent entirely on hidden thinking and
+        # the visible text arrives empty. This agent never needs chain-of-thought - it
+        # classifies, quotes, and verifies - so turn it off. It is also much faster.
+        if settings.gemini_disable_thinking:
+            try:
+                kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+            except (AttributeError, TypeError):  # SDK without thinking support
+                pass
+        return types.GenerateContentConfig(**kwargs)
 
     @classmethod
     @_retry
@@ -236,10 +277,15 @@ def chat(prompt: str, *, temperature: float | None = None, max_output_tokens: in
     resolved = [(name, _provider(name)) for name in names]  # raises on a bad config name
     last: Exception | None = None
 
-    for index, (name, provider) in enumerate(resolved):
+    # A provider that just failed is skipped for a minute. Without this, every one of
+    # the three chat calls per question pays the full failover penalty again.
+    live = [(n, p) for n, p in resolved if not _circuit_open(n)] or resolved
+
+    for index, (name, provider) in enumerate(live):
         started = time.perf_counter()
         try:
             result = provider.chat(prompt, temperature=temp, max_output_tokens=max_output_tokens)
+            _unhealthy_until.pop(name, None)
             logger.debug(
                 "llm_chat",
                 extra={
@@ -251,17 +297,28 @@ def chat(prompt: str, *, temperature: float | None = None, max_output_tokens: in
             return result
         except Exception as exc:  # noqa: BLE001
             last = exc
-            remaining = names[index + 1 :]
+            _trip_circuit(name)
+            remaining = [n for n, _ in live[index + 1 :]]
             logger.warning(
                 "llm_provider_failed",
                 extra={
                     "provider": name,
                     "detail": type(exc).__name__,
+                    "error": str(exc)[:200],
+                    "fatal": isinstance(exc, _Fatal),
                     "falling_back_to": remaining[0] if remaining else None,
+                    "latency_ms": int((time.perf_counter() - started) * 1000),
                 },
             )
 
     raise ProviderError(f"All chat providers failed ({', '.join(names)}): {last}")
+
+
+def provider_health() -> dict[str, str]:
+    """For /api/ready: which providers are currently being skipped."""
+    return {
+        name: ("cooling down" if _circuit_open(name) else "ok") for name in chat_provider_names()
+    }
 
 
 def chat_stream(

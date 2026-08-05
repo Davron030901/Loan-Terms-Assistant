@@ -119,5 +119,6 @@ class ReadyResponse(BaseModel):
     points: int
     documents: int
     chat_providers: list[str] = Field(default_factory=list)
+    provider_health: dict[str, str] = Field(default_factory=dict)
     embed_provider: str = ""
     embed_model: str = ""

@@ -137,3 +137,41 @@ def test_provider_failure_fails_closed(monkeypatch):
 def test_chatty_classifier_reply_fails_closed(monkeypatch):
     monkeypatch.setattr("app.agent.guard.chat", lambda *a, **k: "Sure! I think ALLOW is right.")
     assert guard.check("What is the interest rate?").allowed is False
+
+
+# ── regression: the bug that refused every valid question in production ───────
+def test_an_empty_model_reply_is_refused_but_reported_as_such(monkeypatch):
+    """gemini-2.5-* spend max_output_tokens on hidden reasoning first. At 8 tokens the
+    whole budget went on thinking, the visible text came back empty, and the fail-closed
+    guard read that as REFUSE - rejecting perfectly valid questions in production."""
+    monkeypatch.setattr("app.agent.guard.chat", lambda *a, **k: "")
+    verdict = guard.check("How is interest calculated?")
+    assert verdict.allowed is False
+    assert "no verdict" in verdict.reason, "an empty reply must be distinguishable from a refusal"
+
+
+@pytest.mark.parametrize(
+    "reply",
+    ["ALLOW", "allow", " ALLOW\n", "```\nALLOW\n```", "Answer: ALLOW", "**ALLOW**", "ALLOW."],
+)
+def test_allow_is_recognised_however_the_model_dresses_it_up(reply, monkeypatch):
+    monkeypatch.setattr("app.agent.guard.chat", lambda *a, **k: reply)
+    assert guard.check("What is the interest rate?").allowed is True
+
+
+@pytest.mark.parametrize("reply", ["REFUSE", "refuse", "Answer: REFUSE", "ALLOW... actually REFUSE"])
+def test_refuse_always_wins_over_allow(reply, monkeypatch):
+    monkeypatch.setattr("app.agent.guard.chat", lambda *a, **k: reply)
+    assert guard.check("What is the interest rate?").allowed is False
+
+
+def test_verdict_calls_get_enough_token_headroom(monkeypatch):
+    captured = {}
+
+    def spy(prompt, *, temperature, max_output_tokens):
+        captured["max"] = max_output_tokens
+        return "ALLOW"
+
+    monkeypatch.setattr("app.agent.guard.chat", spy)
+    guard.check("What is the interest rate?")
+    assert captured["max"] >= 16, "8 tokens is not enough headroom for a thinking model"

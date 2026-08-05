@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     embed_dim: int = 768
     llm_temperature: float = 0.0
     gemini_base_url: str = ""
+    # gemini-2.5-* spend max_output_tokens on hidden reasoning first. This agent never
+    # needs it, and leaving it on starves short verdict replies.
+    gemini_disable_thinking: bool = True
+    # A one-word verdict still needs headroom: some models emit a leading newline,
+    # a code fence, or a stray token before the word.
+    verdict_max_tokens: int = 32
 
     # ── Qdrant Cloud ──────────────────────────────────────────────────────────
     qdrant_url: str = ""

@@ -116,3 +116,29 @@ ANSWER:
 {answer}
 
 One word (GROUNDED or NOT_GROUNDED):"""
+
+
+# ── verdict parsing ───────────────────────────────────────────────────────────
+_WORD = __import__("re").compile(r"[A-Z_]+")
+
+
+def read_verdict(raw: str, positive: str, negative: str | None = None) -> bool | None:
+    """Read a one-word verdict from a model reply. Returns None if there isn't one.
+
+    Tolerates the wrappers models add - newlines, code fences, bold, a trailing full
+    stop, a short "Answer:" prefix - but not prose. A verdict buried in a sentence
+    ("Sure! I think ALLOW is right") means the model ignored the format, and a guard
+    that accepts that is a guard an attacker can talk around. Terse or nothing.
+    """
+    if not raw or not raw.strip():
+        return None
+    words = _WORD.findall(raw.upper())
+    if not words:
+        return None
+    if negative and negative in words:
+        return False
+    if positive in words and len(words) <= 3:
+        return True
+    if positive in words:
+        return None  # present, but wrapped in prose - treat as no verdict
+    return False

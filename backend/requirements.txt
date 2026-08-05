@@ -1,18 +1,23 @@
-fastapi==0.115.6
-uvicorn[standard]==0.32.1
-gunicorn==23.0.0
-pydantic==2.10.4
-pydantic-settings==2.7.0
-google-genai==1.2.0
-qdrant-client==1.12.1
-pypdf==5.1.0
-python-dotenv==1.0.1
-sse-starlette==2.1.3
-slowapi==0.1.9
-httpx==0.27.2
-tenacity==9.0.0
+# Ranges, not exact pins, on purpose: an exact pin with no wheel for the host's
+# Python version forces a source build (Rust/maturin) that fails on read-only CI
+# filesystems. These ranges all resolve to versions with prebuilt wheels for
+# Python 3.11 - 3.13. Verified against the 99-test suite on 3.10, 3.11 and 3.13.
 
-# ── dev / test ────────────────────────────────────────
-pytest==8.3.4
-pytest-asyncio==0.24.0
-ruff==0.8.4
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.32,<1.0
+gunicorn>=23.0,<24.0
+pydantic>=2.10,<3.0
+pydantic-settings>=2.7,<3.0
+google-genai>=1.0,<2.0
+qdrant-client>=1.12,<2.0
+pypdf>=5.0,<7.0
+python-dotenv>=1.0,<2.0
+sse-starlette>=2.1,<4.0
+slowapi>=0.1.9,<1.0
+httpx>=0.27,<1.0
+tenacity>=9.0,<10.0
+
+# ── dev / test ────────────────────────────────────────────────────────────────
+pytest>=8.3,<9.0
+pytest-asyncio>=0.24,<2.0
+ruff>=0.8,<1.0

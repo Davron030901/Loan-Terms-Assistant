@@ -1,3 +1,11 @@
+# Render Blueprint. This file MUST live at the repository root — Render looks for
+# render.yaml here by default. A copy inside backend/ is silently ignored, which is
+# how a service ends up on Render's default Python instead of the one pinned below.
+#
+# To use it: Render Dashboard → New + → Blueprint (NOT "Web Service").
+# If you created the service manually instead, this file does nothing — set the same
+# values by hand in the dashboard, including PYTHON_VERSION.
+
 services:
   - type: web
     name: loan-terms-api
@@ -5,12 +13,15 @@ services:
     region: frankfurt          # choose the region nearest your Qdrant Cloud cluster
     plan: free
     rootDir: backend
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: gunicorn app.main:app -k uvicorn.workers.UvicornWorker -b 0.0.0.0:$PORT --workers 1 --timeout 120
     healthCheckPath: /api/health
     envVars:
+      # Belt and braces: backend/.python-version pins this too, and that file works
+      # even when this blueprint is not read at all.
       - key: PYTHON_VERSION
         value: "3.11.9"
+
       # ── secrets: set these in the Render dashboard, never in git ──────────
       - key: GOOGLE_API_KEY
         sync: false
@@ -20,6 +31,7 @@ services:
         sync: false
       - key: CORS_ORIGINS
         sync: false          # e.g. https://your-app.vercel.app,http://localhost:3000
+
       # ── safe defaults ────────────────────────────────────────────────────
       - key: CORS_ORIGIN_REGEX
         value: 'https://.*\.vercel\.app'

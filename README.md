@@ -145,7 +145,9 @@ npm run dev                            # http://localhost:3000
 
 1. Push to GitHub. **Verify no secret is in history:**
    `git log --all --full-history -- "**/.env"` must print nothing.
-2. Render → **New Web Service** → connect the repo. It reads `backend/render.yaml`.
+2. Render → **New + → Blueprint** (not *Web Service*) → connect the repo. It reads `render.yaml`
+   from the repo root. Creating it as a plain Web Service ignores that file — including the Python
+   version pin — and the build fails while compiling `pydantic-core`.
 3. Set the four `sync: false` secrets in the Render dashboard only:
    `GOOGLE_API_KEY`, `QDRANT_URL`, `QDRANT_API_KEY`, `CORS_ORIGINS`.
 4. **Ingest locally against the production cluster.** Point your local `.env` at the same
@@ -321,5 +323,6 @@ public from that moment.
 ---
 
 MIT licensed. Educational project. Always read the original contract.
-#   L o a n - T e r m s - A s s i s t a n t  
+#   L o a n - T e r m s - A s s i s t a n t 
+ 
  

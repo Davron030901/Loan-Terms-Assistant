@@ -140,6 +140,22 @@ npx tsc --noEmit                    # must print nothing
 > it fails, fix it now. Debugging a build inside Vercel's logs is far slower than on your own
 > machine.
 
+**Commit the lockfile.** `npm install` writes `package-lock.json`; that file is what Vercel installs
+from. If you don't commit it, Vercel resolves versions independently and you can end up deploying
+something you never built locally.
+
+```bash
+git add package-lock.json && git commit -m "chore: lock frontend deps"
+```
+
+**Check for known vulnerabilities before you push** — Vercel will block the deployment if it finds
+one, even when the build compiles cleanly:
+
+```bash
+npm audit --omit=dev
+npm ls next            # must be 15.5.21 or newer on the 15.x line
+```
+
 ---
 
 ## Step 4 — Build the index in the cloud (5 min)
@@ -420,6 +436,8 @@ get suspended, reactivate it in the dashboard and re-run `ingest_all` if the dat
 | Symptom | Cause | Fix |
 |---|---|---|
 | Vercel build fails, "no package.json" | Root Directory not set | Project Settings → General → Root Directory → `frontend` |
+| **"Vulnerable version of Next.js detected"** — build compiles fine, deployment still fails | Vercel blocks any deployment containing a Next.js version affected by CVE-2025-66478 (RSC stream cross-session injection) | Upgrade. `package.json` pins `next@^15.5.21`; run `npm install`, commit the updated `package-lock.json`, push. Do **not** use the `DANGEROUSLY_DEPLOY_VULNERABLE_CVE_2025_66478` escape hatch — the vulnerability is real |
+| `npm install` resolves an old Next.js anyway | A stale `package-lock.json` is committed | `rm -rf node_modules package-lock.json && npm install`, then commit the new lockfile |
 | Every question returns "Not stated in the terms." | API pointing at the wrong cluster, or the index is empty | `curl $API/api/ready` — if `points: 0`, re-check `QDRANT_URL` and re-run `ingest_all` |
 | CORS error in the browser console | Vercel URL missing from `CORS_ORIGINS` | Add the exact origin (no trailing slash), redeploy Render |
 | First request takes ~60 s | Render cold start | Expected. The waking banner covers it; add an uptime pinger if you want it gone |

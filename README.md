@@ -7,7 +7,7 @@ page number — and safely refuses everything else.
 |---|---|
 | **Live app** | `https://<your-app>.vercel.app` |
 | **API** | `https://<your-service>.onrender.com` · [`/api/docs`](https://<your-service>.onrender.com/api/docs) |
-| **Stack** | FastAPI · Google Gemini · Qdrant Cloud · Next.js 15 · Tailwind v4 |
+| **Stack** | FastAPI · Google Gemini · Qdrant Cloud · Next.js 15.5 (LTS) · Tailwind v4 |
 
 ---
 

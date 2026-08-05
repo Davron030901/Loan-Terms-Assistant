@@ -15,6 +15,11 @@ from pathlib import Path
 
 import httpx
 
+# Every question costs three chat calls (guard, answer, verifier). Gemini's free tier
+# allows roughly 10-15 requests per minute, so an unthrottled 22-question run generates
+# about 44 rpm - and then grades its own rate limiting as agent failures.
+DEFAULT_DELAY_SECONDS = 15.0
+
 EVIDENCE_DIR = Path(__file__).resolve().parent.parent / "evidence"
 
 # Questions are phrased against what these general T&C documents actually contain:
@@ -50,14 +55,29 @@ INJECTION_CORPUS = [
 ]
 
 
-def _ask(client: httpx.Client, base: str, question: str, doc_id: str) -> dict:
-    r = client.post(
-        f"{base.rstrip('/')}/api/chat",
-        json={"question": question, "doc_id": doc_id},
-        timeout=90,
-    )
-    r.raise_for_status()
-    return r.json()
+def _ask(client: httpx.Client, base: str, question: str, doc_id: str, attempts: int = 3) -> dict:
+    """Ask once, and back off properly if the server or the model says slow down."""
+    for attempt in range(attempts):
+        r = client.post(
+            f"{base.rstrip('/')}/api/chat",
+            json={"question": question, "doc_id": doc_id},
+            timeout=120,
+        )
+        if r.status_code == 429 and attempt < attempts - 1:
+            wait = float(r.headers.get("retry-after", 30))
+            print(f"       rate limited by the API, waiting {wait:.0f}s…")
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        data = r.json()
+        # An "error" verdict during a burst is almost always the model's own rate limit
+        # reaching the guard. Retrying is fairer than scoring it as an agent failure.
+        if data.get("verdict") == "error" and attempt < attempts - 1:
+            print("       provider was busy, retrying in 30s…")
+            time.sleep(30)
+            continue
+        return data
+    raise RuntimeError("gave up after repeated rate limiting")
 
 
 def main() -> int:
@@ -65,6 +85,13 @@ def main() -> int:
     ap.add_argument("--base-url", default="http://localhost:8000")
     ap.add_argument("--doc", default="cibc_personal")
     ap.add_argument("--skip-injection", action="store_true")
+    ap.add_argument(
+        "--delay",
+        type=float,
+        default=DEFAULT_DELAY_SECONDS,
+        help=f"seconds between questions (default {DEFAULT_DELAY_SECONDS:.0f}; "
+        "lower it only if you are on a paid tier)",
+    )
     args = ap.parse_args()
 
     EVIDENCE_DIR.mkdir(exist_ok=True)
@@ -72,8 +99,14 @@ def main() -> int:
     failures = 0
 
     with httpx.Client() as client:
-        print(f"Golden test against {args.base_url}  (document: {args.doc})\n")
-        for question, expected in CASES:
+        total_cases = len(CASES) + (0 if args.skip_injection else len(INJECTION_CORPUS))
+        eta = total_cases * (args.delay + 5) / 60
+        print(f"Golden test against {args.base_url}  (document: {args.doc})")
+        print(f"{total_cases} checks, {args.delay:.0f}s apart to stay inside the free-tier "
+              f"rate limit - about {eta:.0f} minutes.\n")
+        for index, (question, expected) in enumerate(CASES):
+            if index:
+                time.sleep(args.delay)
             started = time.perf_counter()
             try:
                 data = _ask(client, args.base_url, question, args.doc)
@@ -100,9 +133,14 @@ def main() -> int:
             mark = "PASS" if ok else "FAIL"
             print(f"[{mark}] {expected:<22} got {actual:<22} p.{pages}  {question[:58]}")
 
+
         if not args.skip_injection:
             print("\nPrompt-injection corpus:")
-            for question in INJECTION_CORPUS:
+            for index, question in enumerate(INJECTION_CORPUS):
+                # These are caught by the pattern layer with no model call at all, so
+                # they need far less spacing than a full question.
+                if index:
+                    time.sleep(2)
                 try:
                     data = _ask(client, args.base_url, question, args.doc)
                     actual = data.get("verdict")

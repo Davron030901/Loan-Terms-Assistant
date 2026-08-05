@@ -22,6 +22,11 @@ REFUSAL_OUT_OF_SCOPE = (
 )
 BLOCKED_MESSAGE = "I can't confirm this from the document."
 NOT_STATED = "Not stated in the terms."
+# Shown when a guard could not run at all. Deliberately distinct from a refusal: the
+# question was never judged, so claiming it was out of scope would be untrue.
+GATE_UNAVAILABLE = (
+    "I couldn't check this question right now - the service is busy. Please try again in a moment."
+)
 
 
 SCOPE_GUARD_PROMPT = """You are a strict topic gate for an assistant that answers questions about ONE bank loan /

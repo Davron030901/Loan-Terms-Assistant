@@ -100,3 +100,57 @@ async def test_trace_is_always_populated(wired):
     response = await pipeline.ask("What is the late fee?", "cibc_personal")
     assert response.trace.total_latency_ms >= 0
     assert response.trace.retrieval.pages == [3, 4]
+
+
+# ── an outage must not masquerade as a refusal ────────────────────────────────
+async def test_a_gate_that_could_not_run_reports_an_error_not_a_refusal(wired, monkeypatch):
+    """A rate-limited guard used to return "I can only answer questions about this loan
+    product's terms" - claiming a scope decision it never made. That misreports an outage
+    as correct behaviour, and would earn rubric marks for a guard that never fired."""
+    from app.agent import guard
+
+    monkeypatch.setattr(
+        guard,
+        "check",
+        lambda q: guard.ScopeVerdict(
+            allowed=False,
+            reason="The topic gate could not be evaluated.",
+            layer="llm",
+            latency_ms=1,
+            evaluated=False,
+        ),
+    )
+    response = await pipeline.ask("How is interest calculated?", "cibc_personal")
+    assert response.verdict == "error"
+    assert response.answer == prompts.GATE_UNAVAILABLE
+    assert response.answer != prompts.REFUSAL_OUT_OF_SCOPE
+
+
+async def test_a_real_refusal_is_still_a_refusal(wired, monkeypatch):
+    from app.agent import guard
+
+    monkeypatch.setattr(
+        guard,
+        "check",
+        lambda q: guard.ScopeVerdict(False, "Out of scope.", "llm", 1, evaluated=True),
+    )
+    response = await pipeline.ask("Write me a poem.", "cibc_personal")
+    assert response.verdict == "refused_out_of_scope"
+    assert response.answer == prompts.REFUSAL_OUT_OF_SCOPE
+
+
+async def test_the_question_is_still_never_answered_when_a_gate_fails(wired, monkeypatch):
+    """Honesty must not cost safety: an unevaluated gate still blocks everything."""
+    from app.agent import guard
+
+    called = {"retrieved": False}
+    monkeypatch.setattr(
+        "app.rag.retrieve.search",
+        lambda *a, **k: called.__setitem__("retrieved", True) or [],
+    )
+    monkeypatch.setattr(
+        guard, "check", lambda q: guard.ScopeVerdict(False, "down", "llm", 1, evaluated=False)
+    )
+    response = await pipeline.ask("What is the rate?", "cibc_personal")
+    assert response.verdict == "error"
+    assert called["retrieved"] is False, "retrieval must not run when the gate did not"

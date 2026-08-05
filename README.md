@@ -5,8 +5,9 @@ page number — and safely refuses everything else.
 
 | | |
 |---|---|
-| **Live app** | `https://<your-app>.vercel.app` |
-| **API** | `https://<your-service>.onrender.com` · [`/api/docs`](https://<your-service>.onrender.com/api/docs) |
+| **Live app** | **https://loan-terms-assistant.vercel.app** |
+| **API** | https://loan-terms-api.onrender.com · [`/api/docs`](https://loan-terms-api.onrender.com/api/docs) · [`/api/ready`](https://loan-terms-api.onrender.com/api/ready) |
+| **Source** | https://github.com/Davron030901/Loan-Terms-Assistant |
 | **Stack** | FastAPI · OpenAI → Gemini failover · Qdrant Cloud · Next.js 15.5 (LTS) · Tailwind v4 |
 
 ---
@@ -195,6 +196,24 @@ instead of a crash. A free uptime pinger on `/api/health` every 10 minutes remov
 The single most valuable piece of code here is `numeric_audit` — about twenty lines that compare
 every figure in an answer against the retrieved text. A wrong interest rate is the one failure that
 actually hurts someone, and this catches it deterministically, before a token is spent.
+
+---
+
+## Measured performance
+
+Recorded on the live free-tier deployment, `nbu_uz_green`, 5 August 2026:
+
+| Stage | Time |
+|---|---:|
+| Scope guard | 0.5 s |
+| Retrieval (Qdrant, 6 clauses, top score 0.79) | 0.28 s |
+| Answer (gemini-2.5-flash, 1 867 chars) | 3.0 s |
+| Grounding guard | 0.4 s |
+| **Total** | **4.2 s** |
+
+It was 21.5 s before two fixes: the model clients are now warmed at startup, so the first question
+no longer pays ~10 s of TLS and auth; and a provider that fails at boot has its circuit tripped
+immediately, so a dead key costs nothing per request instead of ~8 s.
 
 ---
 

@@ -82,6 +82,11 @@ def _run(question: str, doc_id: str) -> ChatResponse:
         layer=scope.layer,
         latency_ms=scope.latency_ms,
     )
+    if not scope.evaluated:
+        # The gate never ran. Say so. Calling this a refusal would misreport an outage as
+        # a scope decision, and would quietly earn credit for a guard that never fired.
+        logger.warning("scope_guard_unavailable", extra={"reason": scope.reason})
+        return finish("error", prompts.GATE_UNAVAILABLE)
     if not scope.allowed:
         return finish("refused_out_of_scope", prompts.REFUSAL_OUT_OF_SCOPE)
 

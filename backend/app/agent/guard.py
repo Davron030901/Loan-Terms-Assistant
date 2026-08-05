@@ -84,6 +84,10 @@ class ScopeVerdict:
     reason: str
     layer: Layer
     latency_ms: int = 0
+    # False when the gate could not be evaluated at all - a provider outage, a rate
+    # limit, an unparseable reply. Still fail-closed, but reported as a malfunction
+    # rather than as a scope decision.
+    evaluated: bool = True
 
 
 def sanitise(question: str) -> str:
@@ -133,6 +137,7 @@ def check(question: str) -> ScopeVerdict:
             "The topic gate could not be evaluated.",
             "llm",
             int((time.perf_counter() - started) * 1000),
+            evaluated=False,
         )
 
     verdict = prompts.read_verdict(raw, "ALLOW", "REFUSE")
@@ -154,6 +159,7 @@ def check(question: str) -> ScopeVerdict:
             "The topic gate returned no verdict.",
             "llm",
             int((time.perf_counter() - started) * 1000),
+            evaluated=False,
         )
 
     allowed = verdict

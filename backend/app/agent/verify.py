@@ -102,7 +102,9 @@ def is_grounded(answer: str, chunks: list[Chunk]) -> GroundingVerdict:
         )
     except Exception as exc:  # noqa: BLE001 - fail closed (R7)
         logger.warning("grounding_provider_error", extra={"detail": type(exc).__name__})
-        return GroundingVerdict(False, "llm", "The verifier could not be reached.", elapsed())
+        # Blocking is right here - an unverified answer must never ship - but the reason
+        # is an outage, not a detected fabrication.
+        return GroundingVerdict(False, "none", "The verifier could not be reached.", elapsed())
 
     # NOT_GROUNDED is checked first: it contains "GROUNDED" as a substring, so word-level
     # parsing is the only safe way to read it.

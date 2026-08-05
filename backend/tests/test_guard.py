@@ -175,3 +175,25 @@ def test_verdict_calls_get_enough_token_headroom(monkeypatch):
     monkeypatch.setattr("app.agent.guard.chat", spy)
     guard.check("What is the interest rate?")
     assert captured["max"] >= 16, "8 tokens is not enough headroom for a thinking model"
+
+
+def test_a_provider_outage_is_marked_unevaluated(monkeypatch):
+    def explode(*_a, **_k):
+        raise RuntimeError("429 rate limit")
+
+    monkeypatch.setattr("app.agent.guard.chat", explode)
+    verdict = guard.check("What is the interest rate?")
+    assert verdict.allowed is False
+    assert verdict.evaluated is False, "an outage is not a scope decision"
+
+
+def test_a_real_verdict_is_marked_evaluated(monkeypatch):
+    monkeypatch.setattr("app.agent.guard.chat", lambda *a, **k: "REFUSE")
+    verdict = guard.check("Write me a poem.")
+    assert verdict.allowed is False
+    assert verdict.evaluated is True
+
+
+def test_pattern_layer_verdicts_are_evaluated(no_llm):
+    verdict = guard.check("Should I take this loan?")
+    assert verdict.evaluated is True and verdict.layer == "pattern"

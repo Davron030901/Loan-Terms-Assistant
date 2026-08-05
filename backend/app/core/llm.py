@@ -14,6 +14,8 @@ Two providers, two very different policies:
 from __future__ import annotations
 
 import math
+import re
+import threading
 import time
 from collections.abc import Iterator
 from functools import lru_cache
@@ -72,12 +74,36 @@ class _StaleClient(_Retryable):
     """The cached SDK client is dead. Rebuild it and retry on the same provider."""
 
 
+class _RateLimited(_Retryable):
+    """A quota ceiling. Recoverable, but only after a genuine wait."""
+
+
+_RETRY_DELAY = re.compile(r"retry in (\d+(?:\.\d+)?)s|'retryDelay': '(\d+)s'", re.I)
+
+
+def retry_after_seconds(text: str) -> float | None:
+    """Providers tell us exactly how long to wait. Listen to them."""
+    match = _RETRY_DELAY.search(text)
+    if not match:
+        return None
+    return float(match.group(1) or match.group(2))
+
+
 def _classify(exc: Exception) -> ProviderError:
     text = f"{type(exc).__name__}: {exc}".lower()
-    # Checked first: a dead transport can otherwise be mistaken for a connection error
-    # and retried against the same corpse three times before failing over.
+
+    # A dead transport, checked first so it is not mistaken for a connection error and
+    # retried against the same corpse three times before failing over.
     if any(marker in text for marker in _STALE_CLIENT_MARKERS):
         return _StaleClient(str(exc))
+
+    # 429 wins over everything. Google's rate-limit message contains the words "plan and
+    # billing details", which used to match the fatal list - so a transient limit that
+    # says "Please retry in 11s" was treated as a permanently broken key and never
+    # retried. Status code beats prose.
+    if "429" in text or "resource_exhausted" in text or "rate limit" in text:
+        return _RateLimited(str(exc))
+
     if any(marker in text for marker in _FATAL_MARKERS):
         return _Fatal(str(exc))
     if any(marker in text for marker in _RETRYABLE_MARKERS):
@@ -119,6 +145,42 @@ _retry = retry(
     wait=wait_exponential(multiplier=1, min=1, max=4),
     retry=retry_if_exception_type(_Retryable),
 )
+
+# Embedding a whole corpus is a burst of hundreds of calls straight into a per-minute
+# ceiling. Give it more patience and much longer waits than an interactive chat call.
+_embed_retry = retry(
+    reraise=True,
+    stop=stop_after_attempt(6),
+    wait=wait_exponential(multiplier=4, min=5, max=60),
+    retry=retry_if_exception_type(_Retryable),
+)
+
+
+class _Pacer:
+    """Keeps outbound calls under a requests-per-minute ceiling.
+
+    The Gemini SDK sends one HTTP request per text even when handed a list, so a
+    323-chunk corpus is 323 requests - and the free tier allows 100 a minute. Without
+    pacing, ingestion reliably dies about 94 chunks in.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._next_slot = 0.0
+
+    def wait(self, per_minute: int) -> None:
+        if per_minute <= 0:
+            return
+        interval = 60.0 / per_minute
+        with self._lock:
+            now = time.monotonic()
+            sleep_for = max(0.0, self._next_slot - now)
+            self._next_slot = max(now, self._next_slot) + interval
+        if sleep_for:
+            time.sleep(sleep_for)
+
+
+_embed_pacer = _Pacer()
 
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────
@@ -177,7 +239,7 @@ class OpenAIProvider:
             raise _handle(cls, exc) from exc
 
     @classmethod
-    @_retry
+    @_embed_retry
     def embed_batch(cls, texts: list[str], task_type: str) -> list[list[float]]:
         # OpenAI has no task_type; asymmetric query/document embedding is Gemini-only.
         del task_type
@@ -263,7 +325,7 @@ class GeminiProvider:
             raise _handle(cls, exc) from exc
 
     @classmethod
-    @_retry
+    @_embed_retry
     def embed_batch(cls, texts: list[str], task_type: str) -> list[list[float]]:
         from google.genai import types
 
@@ -402,9 +464,12 @@ def embed_batch(
     provider = _provider(settings.embed_provider)
     vectors: list[list[float]] = []
     for start in range(0, len(texts), batch_size):
-        vectors.extend(provider.embed_batch(texts[start : start + batch_size], task_type))
-        if start and start % (batch_size * 5) == 0:
-            logger.info("embed_progress", extra={"done": len(vectors), "total": len(texts)})
+        window = texts[start : start + batch_size]
+        # One HTTP request per text on Gemini, so pace by text rather than by batch.
+        for _ in window:
+            _embed_pacer.wait(settings.embed_requests_per_minute)
+        vectors.extend(provider.embed_batch(window, task_type))
+        logger.info("embed_progress", extra={"done": len(vectors), "total": len(texts)})
     return vectors
 
 

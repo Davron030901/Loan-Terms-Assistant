@@ -77,7 +77,33 @@ def ingest_document(doc_id: str) -> IngestReport:
     return report
 
 
-def ingest_all(recreate: bool = False) -> list[IngestReport]:
+def ingest_all(recreate: bool = False, skip_existing: bool = False) -> list[IngestReport]:
+    """Ingest every document, surviving a failure in any one of them.
+
+    Each document is upserted on its own, so a run that dies half way still leaves the
+    completed documents in place. Continuing means one rate-limit wall does not cost you
+    the work already done.
+    """
     if recreate:
         store.ensure_collection(recreate=True)
-    return [ingest_document(doc_id) for doc_id in registry.document_ids()]
+    else:
+        store.ensure_collection()
+
+    reports: list[IngestReport] = []
+    failures: list[tuple[str, str]] = []
+    for doc_id in registry.document_ids():
+        if skip_existing and store.count(doc_id) > 0:
+            logger.info("ingest_skipped", extra={"doc_id": doc_id, "reason": "already indexed"})
+            continue
+        try:
+            reports.append(ingest_document(doc_id))
+        except Exception as exc:  # noqa: BLE001 - report and carry on
+            failures.append((doc_id, str(exc)[:160]))
+            logger.error("ingest_failed", extra={"doc_id": doc_id, "detail": str(exc)[:200]})
+
+    if failures:
+        logger.error("ingest_incomplete", extra={"failed": [d for d, _ in failures]})
+        for doc_id, detail in failures:
+            print(f"  FAILED  {doc_id}: {detail}")
+        print("\n  Re-run with --resume to pick up only what is missing.")
+    return reports

@@ -238,3 +238,62 @@ def test_both_providers_can_rebuild_their_client():
     for provider in (llm.OpenAIProvider, llm.GeminiProvider):
         assert callable(provider.reset_client)
         provider.reset_client()  # must not raise even when nothing is cached
+
+
+# ── regression: a rate limit is not a billing failure ─────────────────────────
+GOOGLE_429 = (
+    "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current "
+    "quota, please check your plan and billing details. ... Quota exceeded for metric: "
+    "generativelanguage.googleapis.com/embed_content_free_tier_requests, limit: 100. "
+    "Please retry in 11.503138329s.'}}"
+)
+
+
+def test_a_rate_limit_is_retryable_even_though_it_mentions_billing():
+    """Google's 429 text contains "plan and billing details", which used to match the
+    fatal list - so a limit that explicitly says "Please retry in 11s" was treated as a
+    permanently broken key and never retried. Ingestion died 94 chunks in."""
+    error = llm._classify(Exception(GOOGLE_429))
+    assert isinstance(error, llm._Retryable), "a 429 must be retried, not given up on"
+    assert not isinstance(error, llm._Fatal)
+
+
+def test_a_genuine_billing_failure_is_still_fatal():
+    error = llm._classify(Exception("You have insufficient_quota. Please add a payment method."))
+    assert isinstance(error, llm._Fatal)
+
+
+def test_the_provider_retry_delay_is_read_from_the_message():
+    assert llm.retry_after_seconds(GOOGLE_429) == pytest.approx(11.503, rel=1e-3)
+    assert llm.retry_after_seconds("'retryDelay': '30s'") == 30.0
+    assert llm.retry_after_seconds("no delay here") is None
+
+
+def test_embeddings_are_paced_under_the_per_minute_ceiling(monkeypatch):
+    """The Gemini SDK sends one HTTP request per text, so 323 chunks is 323 requests
+    into a 100-per-minute ceiling. Without pacing, ingestion cannot finish."""
+    import time as _time
+
+    slept: list[float] = []
+    monkeypatch.setattr(llm.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(llm.settings, "embed_provider", "gemini")
+    monkeypatch.setattr(llm.settings, "embed_requests_per_minute", 60)  # 1 per second
+    monkeypatch.setattr(
+        llm.GeminiProvider, "embed_batch", staticmethod(lambda texts, task_type: [[0.0] * 4] * len(texts))
+    )
+    llm._embed_pacer._next_slot = _time.monotonic()
+
+    llm.embed_batch(["a", "b", "c", "d", "e"], batch_size=32)
+    assert sum(slept) >= 3.0, f"expected pacing to throttle five calls, slept {slept}"
+
+
+def test_pacing_can_be_switched_off(monkeypatch):
+    slept: list[float] = []
+    monkeypatch.setattr(llm.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(llm.settings, "embed_requests_per_minute", 0)
+    monkeypatch.setattr(llm.settings, "embed_provider", "gemini")
+    monkeypatch.setattr(
+        llm.GeminiProvider, "embed_batch", staticmethod(lambda texts, task_type: [[0.0] * 4] * len(texts))
+    )
+    llm.embed_batch(["a", "b"], batch_size=32)
+    assert not slept

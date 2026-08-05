@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     # A one-word verdict still needs headroom: some models emit a leading newline,
     # a code fence, or a stray token before the word.
     verdict_max_tokens: int = 32
+    # Gemini free tier allows 100 embedding requests per minute, and the SDK issues one
+    # request per text. Stay just under the ceiling; ingestion is a one-off job, so a few
+    # extra minutes is a fair price for it finishing at all.
+    embed_requests_per_minute: int = 90
 
     # ── Qdrant Cloud ──────────────────────────────────────────────────────────
     qdrant_url: str = ""

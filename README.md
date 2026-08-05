@@ -75,9 +75,10 @@ active per conversation** — that is what keeps the scope guarantee meaningful.
 | `sc_vietnam` | Standard Chartered (Vietnam) — Personal Loan T&C | 10 | 60 | EN |
 | `nbu_uz_green` | NBU Uzbekistan — Green Consumer Loan Contract | 5 | 24 | UZ |
 
-Source URLs are recorded in `backend/app/data/documents.json`. The PDFs live in `backend/docs/`
-and are git-ignored by default — add them yourself, or unignore them if the bank's licence allows
-redistribution.
+Source URLs are recorded in `backend/app/data/documents.json`. The PDFs are committed in
+`backend/docs/` so the repo is self-contained — they are public documents published by each bank.
+The running API never reads them: it only queries Qdrant. They are needed solely by
+`scripts/ingest_all.py`, which you run once, from your own machine.
 
 > **An honest note about these contracts.** They are *general* terms and conditions: they describe
 > how interest is calculated, what counts as default, and what notice you get before a fee changes

@@ -57,8 +57,12 @@ This project uses two models, both on the free quota:
 - `gemini-2.5-flash` — the scope guard, the answer, the verifier
 - `models/gemini-embedding-001` at **768 dimensions** — ingestion and search
 
-> **Free-tier rate limits are per-minute.** Ingesting 323 chunks makes 323 embedding calls in a
-> burst. If you hit a 429, the client already retries with exponential backoff — just let it run.
+> **The free tier allows 100 embedding requests per minute — and the Gemini SDK sends one request
+> per text**, so 323 chunks is 323 requests, not 11 batched ones. Ingestion is therefore paced at
+> `EMBED_REQUESTS_PER_MINUTE=90` and takes about 4 minutes. Let it run.
+>
+> If it does stop on a 429, nothing is lost: each document is saved as it completes. Wait a minute
+> and run `python -m scripts.ingest_all --all --resume` to pick up only what is missing.
 
 ---
 
@@ -474,6 +478,8 @@ get suspended, reactivate it in the dashboard and re-run `ingest_all` if the dat
 | **Answers take 15–25 seconds** | The primary chat provider is failing, and each question makes three chat calls — so the failover penalty was paid three times | Fixed by the circuit breaker: a failed provider is skipped for 60 s. Check `curl $API/api/ready` → `provider_health` |
 | `llm_provider_failed` … `"Cannot send a request, as the client has been closed."` | The cached SDK client's transport died between calls — the pipeline runs in worker threads and the SDK tears its transport down with its internal event loop | Fixed in code: the client is rebuilt and the call retried. Look for `llm_client_rebuilt` |
 | `llm_provider_failed` with `"fatal": true` | The key is revoked, wrong, or out of credit — not a transient outage | Replace the key, or set `CHAT_PROVIDER=gemini` and `CHAT_FALLBACK_PROVIDER=none` |
+| Ingestion dies partway with `429 RESOURCE_EXHAUSTED` | The free tier's per-minute embedding ceiling | Wait 60 s, then `python -m scripts.ingest_all --all --resume`. Completed documents are kept |
+| `curl` behaves strangely on Windows | PowerShell aliases `curl` to `Invoke-WebRequest` | Use `curl.exe` or `Invoke-RestMethod` |
 | Answers still work after OpenAI billing lapses | Chat failed over to Gemini — check the logs for `llm_provider_failed` | Working as designed. `/api/ready` shows the active chain |
 | `RetrievalError: The index was built with '…' but EMBED_PROVIDER now resolves to '…'` | You changed the embedding provider without re-indexing | `python -m scripts.ingest_all --all --recreate` |
 | Every answer is wrong but nothing errors | Almost certainly a mixed vector space | `curl $API/api/ready` and compare `embed_model` against what you ingested with |

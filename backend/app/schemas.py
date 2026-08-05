@@ -118,3 +118,6 @@ class ReadyResponse(BaseModel):
     collection: str
     points: int
     documents: int
+    chat_providers: list[str] = Field(default_factory=list)
+    embed_provider: str = ""
+    embed_model: str = ""

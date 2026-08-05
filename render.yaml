@@ -23,8 +23,10 @@ services:
         value: "3.11.9"
 
       # ── secrets: set these in the Render dashboard, never in git ──────────
+      - key: OPENAI_API_KEY
+        sync: false          # primary chat provider
       - key: GOOGLE_API_KEY
-        sync: false
+        sync: false          # chat fallback + embeddings
       - key: QDRANT_URL
         sync: false
       - key: QDRANT_API_KEY
@@ -41,6 +43,12 @@ services:
         value: INFO
       - key: WEB_CONCURRENCY
         value: "1"
+      - key: CHAT_PROVIDER
+        value: openai
+      - key: CHAT_FALLBACK_PROVIDER
+        value: gemini
+      - key: EMBED_PROVIDER
+        value: gemini        # changing this requires re-ingesting with --recreate
       - key: EMBED_DIM
         value: "768"
       - key: RATE_LIMIT_PER_MINUTE

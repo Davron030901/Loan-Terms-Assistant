@@ -106,10 +106,29 @@ cp .env.example .env                # Windows: copy .env.example .env
 Open `backend/.env` and fill in exactly three values:
 
 ```bash
-GOOGLE_API_KEY=AIza...                                    # from Step 1
+OPENAI_API_KEY=sk-...                                     # primary chat provider
+GOOGLE_API_KEY=AIza...                                    # chat fallback + embeddings
 QDRANT_URL=https://xxxxxxxx.eu-central-1-0.aws.cloud.qdrant.io   # from Step 2
 QDRANT_API_KEY=...                                        # from Step 2
 ```
+
+**How the two providers are used:**
+
+| | Provider | Fails over? |
+|---|---|---|
+| Chat — scope guard, answer, verifier | `CHAT_PROVIDER=openai` → `CHAT_FALLBACK_PROVIDER=gemini` | **Yes**, automatically |
+| Embeddings — ingestion and search | `EMBED_PROVIDER=gemini` | **No, deliberately** |
+
+Chat failover is safe because anything either model writes still has to pass the citation
+validator and the grounding guard. A weaker fallback cannot loosen a guarantee — at worst its
+answer gets blocked.
+
+Embeddings are different. Two embedding models are two different vector spaces: a Gemini query
+searched against OpenAI vectors returns numerically valid, semantically meaningless neighbours.
+Retrieval would quietly become nonsense while every health check stayed green. So the embedding
+provider is pinned, every stored vector is stamped with the model that produced it, and a mismatch
+raises an error instead of degrading. **Changing `EMBED_PROVIDER` requires
+`python -m scripts.ingest_all --all --recreate`.**
 
 Confirm the PDFs are in place — five files, exact names:
 
@@ -272,7 +291,8 @@ git push -u origin main
 
    | Key | Value |
    |---|---|
-   | `GOOGLE_API_KEY` | your `AIza…` key |
+   | `OPENAI_API_KEY` | your `sk-…` key — primary chat provider |
+   | `GOOGLE_API_KEY` | your `AIza…` key — chat fallback + embeddings |
    | `QDRANT_URL` | your cluster URL |
    | `QDRANT_API_KEY` | your Qdrant key |
    | `CORS_ORIGINS` | `http://localhost:3000` *(you'll add the Vercel URL in Step 8)* |
@@ -293,7 +313,9 @@ curl $API/api/health
 # {"status":"ok","version":"1.0.0","environment":"production"}
 
 curl $API/api/ready
-# {"ready":true,"collection":"loan_terms","points":323,"documents":5}
+# {"ready":true,"points":323,"documents":5,
+#  "chat_providers":["openai","gemini"],"embed_provider":"gemini",
+#  "embed_model":"models/gemini-embedding-001"}
 
 curl -X POST $API/api/chat -H 'content-type: application/json' \
   -d '{"question":"How is interest calculated?","doc_id":"cibc_personal"}'
@@ -448,6 +470,9 @@ get suspended, reactivate it in the dashboard and re-run `ingest_all` if the dat
 | Service crash-loops on boot | `AUTO_INGEST=true` | Set it to `false`. Never ingest during startup on the free tier |
 | `Vector dimension error` on ingest | Collection built at a different size | `python -m scripts.ingest_all --all --recreate` with `EMBED_DIM=768` |
 | 429 from Gemini during ingest | Free-tier per-minute limit | Harmless — tenacity retries with backoff. Let it run |
+| Answers still work after OpenAI billing lapses | Chat failed over to Gemini — check the logs for `llm_provider_failed` | Working as designed. `/api/ready` shows the active chain |
+| `RetrievalError: The index was built with '…' but EMBED_PROVIDER now resolves to '…'` | You changed the embedding provider without re-indexing | `python -m scripts.ingest_all --all --recreate` |
+| Every answer is wrong but nothing errors | Almost certainly a mixed vector space | `curl $API/api/ready` and compare `embed_model` against what you ingested with |
 | Answers arrive but with no citations | Model ignoring the format | Check `LLM_TEMPERATURE=0`; the citation validator will block these rather than show them |
 | Guard refuses a legitimate question | A pattern is too broad | Add the case to `tests/test_guard.py`, then narrow the regex in `guard.py` |
 

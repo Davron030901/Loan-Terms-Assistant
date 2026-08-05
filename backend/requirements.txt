@@ -9,6 +9,7 @@ gunicorn>=23.0,<24.0
 pydantic>=2.10,<3.0
 pydantic-settings>=2.7,<3.0
 google-genai>=1.0,<2.0
+openai>=1.60,<3.0
 qdrant-client>=1.12,<2.0
 pypdf>=5.0,<7.0
 python-dotenv>=1.0,<2.0

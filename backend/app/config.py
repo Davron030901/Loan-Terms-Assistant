@@ -26,6 +26,18 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
+    # ── Provider routing ──────────────────────────────────────────────────────
+    # Chat may fail over. Embeddings may not - see core/llm.embed_batch().
+    chat_provider: str = "openai"
+    chat_fallback_provider: str = "gemini"
+    embed_provider: str = "gemini"
+
+    # ── OpenAI ────────────────────────────────────────────────────────────────
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4o-mini"
+    openai_embed_model: str = "text-embedding-3-small"
+    openai_base_url: str = ""
+
     # ── Google Gemini ─────────────────────────────────────────────────────────
     google_api_key: str = ""
     gemini_chat_model: str = "gemini-2.5-flash"
@@ -71,6 +83,14 @@ class Settings(BaseSettings):
     docs_dir: Path = Field(default=BACKEND_ROOT / "docs")
 
     # ── validators ────────────────────────────────────────────────────────────
+    @field_validator("chat_provider", "chat_fallback_provider", "embed_provider")
+    @classmethod
+    def _valid_provider(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        if v not in ("openai", "gemini", "none", ""):
+            raise ValueError("provider must be 'openai', 'gemini' or 'none'")
+        return v
+
     @field_validator("embed_dim")
     @classmethod
     def _valid_dim(cls, v: int) -> int:
@@ -109,12 +129,32 @@ class Settings(BaseSettings):
     def is_production(self) -> bool:
         return self.environment.lower() in ("production", "prod")
 
+    _KEY_FOR = {"openai": ("OPENAI_API_KEY", "openai_api_key"), "gemini": ("GOOGLE_API_KEY", "google_api_key")}
+
+    def _has_key(self, provider: str) -> bool:
+        entry = self._KEY_FOR.get(provider)
+        return bool(entry and getattr(self, entry[1]))
+
+    @property
+    def chat_chain(self) -> list[str]:
+        chain = [self.chat_provider]
+        if self.chat_fallback_provider not in ("", "none", self.chat_provider):
+            chain.append(self.chat_fallback_provider)
+        return chain
+
     def require_llm(self) -> None:
-        """Fail loudly, naming the exact missing variable."""
-        if not self.google_api_key:
+        """At least one chat provider must be usable, and the embedding provider must be."""
+        if not any(self._has_key(p) for p in self.chat_chain):
+            names = ", ".join(self._KEY_FOR[p][0] for p in self.chat_chain if p in self._KEY_FOR)
             raise RuntimeError(
-                "GOOGLE_API_KEY is missing. Copy backend/.env.example to backend/.env "
-                "and paste your Google AI Studio key."
+                f"No chat provider is configured. Set at least one of: {names} in backend/.env."
+            )
+        if not self._has_key(self.embed_provider):
+            var = self._KEY_FOR[self.embed_provider][0]
+            raise RuntimeError(
+                f"{var} is missing, and EMBED_PROVIDER={self.embed_provider}. "
+                "Embeddings have no fallback: set that key, or change EMBED_PROVIDER "
+                "and re-run ingestion with --recreate."
             )
 
     def require_vector_store(self) -> None:

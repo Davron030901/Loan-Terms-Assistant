@@ -5,7 +5,9 @@ from __future__ import annotations
 import re
 
 from app.config import settings
-from app.core.llm import TASK_QUERY, embed
+from app.core.llm import TASK_QUERY, embed, embedding_fingerprint
+from app.core.errors import RetrievalError
+from app.core.logging import logger
 from app.rag import store
 from app.rag.constants import expand
 from app.schemas import Chunk
@@ -37,6 +39,24 @@ def _dedupe(chunks: list[Chunk]) -> list[Chunk]:
     return kept
 
 
+def _assert_same_vector_space(payload: dict) -> None:
+    """A query embedded by one model cannot meaningfully search another model's vectors.
+
+    The numbers still work - cosine similarity happily returns neighbours - but they are
+    the wrong clauses, and every health check stays green while the agent cites nonsense.
+    Fail loudly instead.
+    """
+    indexed = payload.get("embed_model")
+    if not indexed:
+        return  # index predates fingerprinting; nothing to compare against
+    current = embedding_fingerprint()["embed_model"]
+    if indexed != current:
+        raise RetrievalError(
+            f"The index was built with '{indexed}' but EMBED_PROVIDER now resolves to "
+            f"'{current}'. Re-run: python -m scripts.ingest_all --all --recreate"
+        )
+
+
 def search(question: str, doc_id: str, k: int | None = None) -> list[Chunk]:
     """Return the surviving evidence, or [] when there is none.
 
@@ -46,6 +66,8 @@ def search(question: str, doc_id: str, k: int | None = None) -> list[Chunk]:
     limit = k or settings.retriever_top_k
     vector = embed(expand(question), task_type=TASK_QUERY)
     hits = store.search(vector, doc_id=doc_id, limit=limit * 2)
+    if hits:
+        _assert_same_vector_space(hits[0]["payload"])
 
     chunks = [
         Chunk(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import asdict, dataclass
 
-from app.core.llm import TASK_DOCUMENT, embed_batch
+from app.core.llm import TASK_DOCUMENT, embed_batch, embedding_fingerprint
 from app.core.logging import logger
 from app.rag import registry, store
 from app.rag.chunking import chunk_pdf, extract_pages
@@ -35,7 +35,11 @@ def ingest_document(doc_id: str) -> IngestReport:
     if not chunks:
         raise ValueError(f"No extractable text in {path.name}. Is it a scan rather than text?")
 
-    logger.info("ingest_start", extra={"doc_id": doc_id, "pages": pages, "chunks": len(chunks)})
+    fingerprint = embedding_fingerprint()
+    logger.info(
+        "ingest_start",
+        extra={"doc_id": doc_id, "pages": pages, "chunks": len(chunks), **fingerprint},
+    )
 
     vectors = embed_batch([c.text for c in chunks], task_type=TASK_DOCUMENT)
 
@@ -54,6 +58,9 @@ def ingest_document(doc_id: str) -> IngestReport:
                 "language": language,
                 "char_start": chunk.char_start,
                 "char_end": chunk.char_end,
+                # Which vector space this point belongs to. Retrieval refuses to search
+                # across a mismatch rather than returning meaningless neighbours.
+                **fingerprint,
             },
         )
         for chunk, vector in zip(chunks, vectors, strict=True)

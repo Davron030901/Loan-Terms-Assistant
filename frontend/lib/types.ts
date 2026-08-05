@@ -78,6 +78,16 @@ export interface DocumentInfo {
   is_default: boolean;
 }
 
+export interface ReadyResponse {
+  ready: boolean;
+  collection: string;
+  points: number;
+  documents: number;
+  chat_providers: string[];
+  embed_provider: string;
+  embed_model: string;
+}
+
 export interface DocumentsResponse {
   default_doc_id: string;
   documents: DocumentInfo[];

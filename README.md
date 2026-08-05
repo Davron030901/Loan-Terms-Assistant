@@ -7,7 +7,7 @@ page number — and safely refuses everything else.
 |---|---|
 | **Live app** | `https://<your-app>.vercel.app` |
 | **API** | `https://<your-service>.onrender.com` · [`/api/docs`](https://<your-service>.onrender.com/api/docs) |
-| **Stack** | FastAPI · Google Gemini · Qdrant Cloud · Next.js 15.5 (LTS) · Tailwind v4 |
+| **Stack** | FastAPI · OpenAI → Gemini failover · Qdrant Cloud · Next.js 15.5 (LTS) · Tailwind v4 |
 
 ---
 
@@ -184,6 +184,9 @@ instead of a crash. A free uptime pinger on `/api/health` every 10 minutes remov
 | A subtler fabrication is caught | Independent entailment check, fresh call, temperature 0 | `app/agent/verify.py` |
 | Provider failure can't leak a guess | Every guard fails **closed**: errors and timeouts mean refuse or block | `guard.py`, `verify.py` |
 | Secrets never reach the browser | The frontend has exactly two `NEXT_PUBLIC_*` vars, neither a credential | `frontend/lib/api.ts` |
+| One provider outage isn't an outage | Chat runs OpenAI-first and fails over to Gemini automatically | `core/llm.chat` |
+| Failover can't weaken a guarantee | Both gates run on whatever the fallback wrote, unchanged | `agent/pipeline.py` |
+| Vector spaces are never mixed | Embeddings are pinned to one provider and stamped on every point; a mismatch raises | `core/llm.embed_batch`, `rag/retrieve.py` |
 
 The single most valuable piece of code here is `numeric_audit` — about twenty lines that compare
 every figure in an answer against the retrieved text. A wrong interest rate is the one failure that

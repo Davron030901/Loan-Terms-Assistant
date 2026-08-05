@@ -1,0 +1,60 @@
+{
+  "default_doc_id": "cibc_personal",
+  "documents": [
+    {
+      "doc_id": "cibc_personal",
+      "file": "cibc_personal_loan.pdf",
+      "bank": "CIBC",
+      "title": "CIBC Personal Loan Terms and Conditions",
+      "jurisdiction": "Canada",
+      "language": "en",
+      "pages": 15,
+      "source_url": "https://www.cibc.com/content/dam/personal_banking/advice_centre/documents/personal-loan-terms-and-conditions-en.pdf",
+      "is_default": true
+    },
+    {
+      "doc_id": "cimb_personal",
+      "file": "cimb_personal_loan.pdf",
+      "bank": "CIMB Bank",
+      "title": "General Terms and Conditions Governing Personal Loans",
+      "jurisdiction": "Singapore / Malaysia",
+      "language": "en",
+      "pages": 13,
+      "source_url": "https://www.cimb.com.sg/",
+      "is_default": false
+    },
+    {
+      "doc_id": "sib_personal",
+      "file": "south_indian_bank_loan.pdf",
+      "bank": "The South Indian Bank",
+      "title": "General Terms and Conditions of the Personal Loan Agreement",
+      "jurisdiction": "India",
+      "language": "en",
+      "pages": 7,
+      "source_url": "https://www.southindianbank.com/",
+      "is_default": false
+    },
+    {
+      "doc_id": "sc_vietnam",
+      "file": "standard_chartered_loan.pdf",
+      "bank": "Standard Chartered Bank (Vietnam)",
+      "title": "Terms and Conditions Governing Personal Loan",
+      "jurisdiction": "Vietnam",
+      "language": "en",
+      "pages": 10,
+      "source_url": "https://www.sc.com/vn/",
+      "is_default": false
+    },
+    {
+      "doc_id": "nbu_uz_green",
+      "file": "nbu_uzbek_consumer_loan.pdf",
+      "bank": "NBU (O'zbekiston Milliy Banki)",
+      "title": "Yashil iste'mol krediti ajratish to'g'risida kredit shartnomasi",
+      "jurisdiction": "Uzbekistan",
+      "language": "uz",
+      "pages": 5,
+      "source_url": "https://nbu.uz/",
+      "is_default": false
+    }
+  ]
+}

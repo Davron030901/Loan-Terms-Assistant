@@ -119,11 +119,14 @@ export async function streamChat(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let sawFinal = false;
 
   const dispatch = (frame: string) => {
     let event = "message";
     const dataLines: string[] = [];
     for (const line of frame.split("\n")) {
+      // ": ping" comment lines are keep-alives and carry no payload.
+      if (line.startsWith(":")) continue;
       if (line.startsWith("event:")) event = line.slice(6).trim();
       else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
     }
@@ -136,7 +139,10 @@ export async function streamChat(
     }
     if (event === "trace") handlers.onTrace?.(payload as TraceEvent);
     else if (event === "token") handlers.onToken?.((payload as { text: string }).text);
-    else if (event === "final") handlers.onFinal?.(payload as ChatResponse);
+    else if (event === "final") {
+      sawFinal = true;
+      handlers.onFinal?.(payload as ChatResponse);
+    }
     else if (event === "error") {
       const e = payload as { message?: string; request_id?: string };
       handlers.onError?.(new ApiRequestError(e.message ?? "Stream error", "stream_error", 0, e.request_id));
@@ -146,10 +152,24 @@ export async function streamChat(
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+    // Normalise line endings BEFORE looking for frame boundaries. sse-starlette
+    // separates events with "\r\n\r\n"; splitting on "\n\n" never matches it,
+    // because a "\r" sits between the two newlines. The buffer then grows forever
+    // and not a single event is ever dispatched - the server answers correctly and
+    // the UI shows nothing at all.
+    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
     const frames = buffer.split("\n\n");
     buffer = frames.pop() ?? "";
     for (const frame of frames) if (frame.trim()) dispatch(frame);
   }
   if (buffer.trim()) dispatch(buffer);
+
+  // Second line of defence. Streaming can also be defeated by a proxy that buffers
+  // the response, which looks identical from here: the request succeeds and no
+  // "final" ever arrives. Rather than leaving the user staring at a spinner, ask the
+  // plain endpoint for the same answer.
+  if (!sawFinal) {
+    const fallback = await postChat(body, signal);
+    handlers.onFinal?.(fallback);
+  }
 }

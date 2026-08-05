@@ -227,6 +227,29 @@ Frontend static analysis across 24 TypeScript files:
 
 ---
 
+## The bug the deferred test would have caught
+
+**Every backend check in this report passed while the user interface showed nothing at all.**
+
+`sse-starlette` separates events with `\r\n\r\n`. The browser client split the stream on
+`"\n\n"`, which never matches that sequence — a `\r` sits between the two newlines. The buffer
+grew forever, not one event was ever dispatched, the trace panel froze on "running", and no answer
+ever appeared. Meanwhile the server logged `verdict=answered` in 2.5 s, every time.
+
+Two lessons, both worth writing down:
+
+1. **Green backend logs are not a working product.** This report verified the pipeline, the guards,
+   the API contract and the SSE *event order* — but the event order was checked with `curl`, which
+   is not the client that ships. The one untested boundary is exactly where the bug lived.
+2. **A protocol that "obviously works" deserves a test against real bytes.** The fix is now covered
+   by parsing the exact wire format `sse-starlette` emits, `\r\n` and keep-alive comments included.
+
+The client now normalises line endings before framing, ignores `:` keep-alive comments, and — if a
+stream ever completes without a `final` event, which is also what a buffering proxy looks like —
+falls back to the non-streaming endpoint rather than leaving a spinner on screen.
+
+---
+
 ## Deferred — the one thing not tested
 
 **`npm install` and `next build` could not be run here.** The sandbox network could not pull the

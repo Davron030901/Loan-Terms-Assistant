@@ -75,7 +75,11 @@ class _StaleClient(_Retryable):
 
 
 class _RateLimited(_Retryable):
-    """A quota ceiling. Recoverable, but only after a genuine wait."""
+    """A per-minute ceiling. Recoverable after a short, known wait."""
+
+
+class _QuotaExhausted(ProviderError):
+    """A daily allowance is gone. Waiting seconds will not help; do not retry."""
 
 
 _RETRY_DELAY = re.compile(r"retry in (\d+(?:\.\d+)?)s|'retryDelay': '(\d+)s'", re.I)
@@ -102,6 +106,11 @@ def _classify(exc: Exception) -> ProviderError:
     # says "Please retry in 11s" was treated as a permanently broken key and never
     # retried. Status code beats prose.
     if "429" in text or "resource_exhausted" in text or "rate limit" in text:
+        # A per-minute ceiling tells you how long to wait. A daily quota does not, and
+        # waiting will not help - the two need different handling.
+        per_day = "perday" in text.replace("_", "").replace("-", "") or "requests per day" in text
+        if per_day or retry_after_seconds(text) is None:
+            return _QuotaExhausted(str(exc))
         return _RateLimited(str(exc))
 
     if any(marker in text for marker in _FATAL_MARKERS):

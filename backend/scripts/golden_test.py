@@ -83,7 +83,32 @@ def _ask(client: httpx.Client, base: str, question: str, doc_id: str, attempts: 
             time.sleep(30)
             continue
         return data
-    raise RuntimeError("gave up after repeated rate limiting")
+    raise QuotaExhausted()
+
+
+class QuotaExhausted(RuntimeError):
+    """The model provider stopped answering. Almost always the daily free allowance."""
+
+    MESSAGE = """
+  ────────────────────────────────────────────────────────────────────────────
+  The model provider is refusing every request.
+
+  This is almost certainly the Gemini free-tier DAILY allowance, not a
+  per-minute limit - waiting a few more seconds will not help.
+
+  Today's usage adds up fast: ingesting 323 chunks is 323 embedding calls, and
+  every golden-test run is another 66 chat calls.
+
+  Options, best first:
+    1. Enable billing on the Google Cloud project. For this workload that is
+       cents per month, and it removes the ceiling entirely.
+    2. Use an API key from a DIFFERENT Google Cloud project. Free quota is
+       counted per project, and you already have several.
+    3. Set a working OPENAI_API_KEY and CHAT_FALLBACK_PROVIDER=openai. That is
+       exactly what the failover was built for.
+    4. Wait for the daily reset (midnight US Pacific).
+  ────────────────────────────────────────────────────────────────────────────
+"""
 
 
 def main() -> int:
@@ -119,6 +144,11 @@ def main() -> int:
                 actual = data.get("verdict", "error")
                 answer = data.get("answer", "")
                 pages = [c["page"] for c in data.get("citations", [])]
+            except QuotaExhausted:
+                print(QuotaExhausted.MESSAGE)
+                print(f"  Stopped after {len(rows)} of {len(CASES)} checks - the remaining")
+                print("  results would only measure the quota, not the agent.\n")
+                return 2
             except Exception as exc:  # noqa: BLE001
                 actual, answer, pages = "error", str(exc)[:120], []
 

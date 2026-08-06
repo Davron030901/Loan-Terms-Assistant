@@ -35,12 +35,16 @@ class Settings(BaseSettings):
 
     # ── OpenAI ────────────────────────────────────────────────────────────────
     openai_api_key: str = ""
+    # Comma- or newline-separated. Free and trial tiers meter per key, so several keys
+    # multiply the ceiling; the pool rotates automatically when one is spent.
+    openai_api_keys: str = ""
     openai_model: str = "gpt-4o-mini"
     openai_embed_model: str = "text-embedding-3-small"
     openai_base_url: str = ""
 
     # ── Google Gemini ─────────────────────────────────────────────────────────
     google_api_key: str = ""
+    google_api_keys: str = ""
     gemini_chat_model: str = "gemini-2.5-flash"
     gemini_embed_model: str = "models/gemini-embedding-001"
     embed_dim: int = 768
@@ -132,6 +136,25 @@ class Settings(BaseSettings):
         return v
 
     # ── derived ───────────────────────────────────────────────────────────────
+    @staticmethod
+    def _split_keys(*values: str) -> list[str]:
+        """Parse one or more key lists, de-duplicated, order preserved."""
+        seen: dict[str, None] = {}
+        for value in values:
+            for raw in (value or "").replace("\n", ",").split(","):
+                key = raw.strip().strip('"').strip("'")
+                if key:
+                    seen.setdefault(key, None)
+        return list(seen)
+
+    @property
+    def openai_key_list(self) -> list[str]:
+        return self._split_keys(self.openai_api_keys, self.openai_api_key)
+
+    @property
+    def google_key_list(self) -> list[str]:
+        return self._split_keys(self.google_api_keys, self.google_api_key)
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
@@ -143,8 +166,11 @@ class Settings(BaseSettings):
     _KEY_FOR = {"openai": ("OPENAI_API_KEY", "openai_api_key"), "gemini": ("GOOGLE_API_KEY", "google_api_key")}
 
     def _has_key(self, provider: str) -> bool:
-        entry = self._KEY_FOR.get(provider)
-        return bool(entry and getattr(self, entry[1]))
+        if provider == "openai":
+            return bool(self.openai_key_list)
+        if provider == "gemini":
+            return bool(self.google_key_list)
+        return False
 
     @property
     def chat_chain(self) -> list[str]:
@@ -180,6 +206,9 @@ class Settings(BaseSettings):
                 "URL and API key in backend/.env."
             )
 
+    def key_counts(self) -> dict[str, int]:
+        return {"openai": len(self.openai_key_list), "gemini": len(self.google_key_list)}
+
     def redacted(self) -> dict[str, object]:
         """Settings safe to write to a log line."""
         out: dict[str, object] = {}
@@ -188,6 +217,9 @@ class Settings(BaseSettings):
                 out[name] = f"***set*** (len={len(str(value))})"
             else:
                 out[name] = str(value) if isinstance(value, Path) else value
+        # Counts are useful; the keys themselves never are.
+        out["openai_api_keys"] = f"{len(self.openai_key_list)} key(s)"
+        out["google_api_keys"] = f"{len(self.google_key_list)} key(s)"
         return out
 
 

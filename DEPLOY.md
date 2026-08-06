@@ -480,6 +480,7 @@ get suspended, reactivate it in the dashboard and re-run `ingest_all` if the dat
 | `llm_provider_failed` with `"fatal": true` | The key is revoked, wrong, or out of credit — not a transient outage | Replace the key, or set `CHAT_PROVIDER=gemini` and `CHAT_FALLBACK_PROVIDER=none` |
 | Ingestion dies partway with `429 RESOURCE_EXHAUSTED` | The free tier's per-minute embedding ceiling | Wait 60 s, then `python -m scripts.ingest_all --all --resume`. Completed documents are kept |
 | `curl` behaves strangely on Windows | PowerShell aliases `curl` to `Invoke-WebRequest` | Use `curl.exe` or `Invoke-RestMethod` |
+| Everything works, then stops for the day | One key's daily allowance is spent | Add more keys to `GOOGLE_API_KEYS`, comma-separated. Calls cycle across the pool, so the allowance multiplies. `curl $API/api/ready` shows `key_pools` |
 | Answers still work after OpenAI billing lapses | Chat failed over to Gemini — check the logs for `llm_provider_failed` | Working as designed. `/api/ready` shows the active chain |
 | `RetrievalError: The index was built with '…' but EMBED_PROVIDER now resolves to '…'` | You changed the embedding provider without re-indexing | `python -m scripts.ingest_all --all --recreate` |
 | Every answer is wrong but nothing errors | Almost certainly a mixed vector space | `curl $API/api/ready` and compare `embed_model` against what you ingested with |

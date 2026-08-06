@@ -61,6 +61,120 @@ _FATAL_MARKERS = (
 CIRCUIT_OPEN_SECONDS = 60.0
 _unhealthy_until: dict[str, float] = {}
 
+# How long to rest a single API key, by what went wrong with it.
+COOLDOWN_SECONDS = {
+    "rate_limited": 60.0,       # a per-minute ceiling; back in a minute
+    "quota_exhausted": 3600.0,  # a daily allowance; try again in an hour
+    "fatal": 3600.0,            # revoked or malformed; do not keep hammering it
+    "error": 60.0,
+}
+
+
+class KeyPool:
+    """A rotating pool of API keys for one provider.
+
+    Free tiers are metered per key, so several keys multiply the ceiling. When a key hits
+    a limit it is rested rather than retried, and the next healthy key takes over
+    immediately - the caller never sees the switch.
+
+    Rotating KEYS is safe in a way that rotating PROVIDERS is not: the model is
+    unchanged, so embeddings from key 1 and key 7 land in the same vector space. That is
+    why this pool is used for embeddings too, while provider failover is not.
+    """
+
+    def __init__(self, name: str, keys: list[str]) -> None:
+        self.name = name
+        # However many are configured - one key or fifty. The size is never assumed.
+        self.keys = [k.strip() for k in keys if k and k.strip()]
+        self._resting_until: dict[int, float] = {}
+        self._reason: dict[int, str] = {}
+        self._cursor = 0
+        self._lock = threading.Lock()
+
+    def __bool__(self) -> bool:
+        return bool(self.keys)
+
+    @staticmethod
+    def fingerprint(key: str) -> str:
+        """Enough to tell two keys apart in a log line, useless to anyone who reads it."""
+        return f"…{key[-4:]}" if len(key) >= 4 else "…"
+
+    def available(self) -> list[int]:
+        now = time.monotonic()
+        return [i for i in range(len(self.keys)) if self._resting_until.get(i, 0.0) <= now]
+
+    def order(self) -> list[int]:
+        """Healthy keys in round-robin order, wrapping past the last one to the first.
+
+        The cursor advances on every acquisition, not only on failure. That matters:
+        with sticky selection, key #1 serves every request until it hits its per-minute
+        ceiling, you eat a 429, and the same thing happens to key #2 a minute later.
+        Spreading each call across the pool means ten keys behave like ten times the
+        per-minute allowance and the ceiling is never reached in the first place.
+
+        If every key is resting, all of them are returned anyway - one last attempt
+        beats refusing to try, since a cooldown is only an estimate.
+        """
+        healthy = self.available()
+        if not healthy:
+            return list(range(len(self.keys)))
+        with self._lock:
+            # The counter is unbounded and only reduced modulo the pool size at the
+            # moment of use. Wrapping it in place would tie its meaning to whatever the
+            # pool size happened to be then: after seven keys went quiet the cursor
+            # would be trapped in 0-2, and it would stay lopsided even once they came
+            # back. Nothing here assumes a particular number of keys - one, three,
+            # ten or fifty all cycle the same way.
+            start = self._cursor % len(healthy)
+            self._cursor += 1
+        return healthy[start:] + healthy[:start]
+
+    def rest(self, index: int, reason: str) -> None:
+        seconds = COOLDOWN_SECONDS.get(reason, COOLDOWN_SECONDS["error"])
+        with self._lock:
+            self._resting_until[index] = time.monotonic() + seconds
+            self._reason[index] = reason
+        logger.warning(
+            "api_key_rested",
+            extra={
+                "provider": self.name,
+                "key": f"#{index + 1}/{len(self.keys)} {self.fingerprint(self.keys[index])}",
+                "reason": reason,
+                "seconds": int(seconds),
+                "still_available": len(self.available()),
+            },
+        )
+
+    def revive(self, index: int) -> None:
+        with self._lock:
+            self._resting_until.pop(index, None)
+            self._reason.pop(index, None)
+
+    def status(self) -> dict[str, object]:
+        """Safe to serve over HTTP: counts and reasons, never key material."""
+        now = time.monotonic()
+        available = self.available()
+        return {
+            "total": len(self.keys),
+            "available": len(available),
+            "next_key": f"#{available[self._cursor % len(available)] + 1}" if available else None,
+            "resting": [
+                {
+                    "key": f"#{i + 1}",
+                    "reason": self._reason.get(i, "error"),
+                    "retry_in_seconds": int(self._resting_until[i] - now),
+                }
+                for i in sorted(self._resting_until)
+                if self._resting_until[i] > now
+            ],
+        }
+
+    def reset(self) -> None:
+        with self._lock:
+            self._resting_until.clear()
+            self._reason.clear()
+            self._cursor = 0
+
 
 class _Retryable(ProviderError):
     """A transient provider failure, worth retrying on the same provider."""
@@ -139,6 +253,18 @@ def _circuit_open(name: str) -> bool:
 
 def reset_circuits() -> None:
     _unhealthy_until.clear()
+    for pool in (OPENAI_KEYS, GEMINI_KEYS):
+        pool.reset()
+
+
+def _reason_for(exc: Exception) -> str:
+    if isinstance(exc, _QuotaExhausted):
+        return "quota_exhausted"
+    if isinstance(exc, _RateLimited):
+        return "rate_limited"
+    if isinstance(exc, _Fatal):
+        return "fatal"
+    return "error"
 
 
 def _l2_normalise(vector: list[float]) -> list[float]:
@@ -193,22 +319,61 @@ _embed_pacer = _Pacer()
 
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────
-class OpenAIProvider:
-    name = "openai"
+class _PooledProvider:
+    """Shared plumbing: try each healthy key in turn, resting the ones that fail."""
+
+    name = "provider"
+    pool: "KeyPool"
 
     @classmethod
     def reset_client(cls) -> None:
         cls._client.cache_clear()
 
+    @classmethod
+    def _with_key(cls, call):
+        """Run `call(key)` against each healthy key until one succeeds.
+
+        A key that fails is rested for a duration that matches why it failed - a minute
+        for a per-minute ceiling, an hour for a spent daily allowance or a dead key - and
+        the next key is tried immediately. From the caller's side this is invisible.
+        """
+        if not cls.pool:
+            raise ProviderError(f"No API key configured for {cls.name}.")
+
+        indices = cls.pool.order()
+        last: Exception | None = None
+        for position, index in enumerate(indices):
+            try:
+                result = call(cls.pool.keys[index])
+                cls.pool.revive(index)
+                if position:
+                    logger.info(
+                        "api_key_rotated",
+                        extra={"provider": cls.name, "now_using": f"#{index + 1}"},
+                    )
+                return result
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+                error = exc if isinstance(exc, ProviderError) else _classify(exc)
+                if isinstance(error, _StaleClient):
+                    cls.reset_client()
+                    raise error from exc  # a dead transport is not the key's fault
+                cls.pool.rest(index, _reason_for(error))
+                if position == len(indices) - 1:
+                    raise error from exc
+        raise ProviderError(f"All {len(indices)} {cls.name} keys failed: {last}")
+
+
+class OpenAIProvider(_PooledProvider):
+    name = "openai"
+
     @staticmethod
-    @lru_cache
-    def _client() -> Any:
-        if not settings.openai_api_key:
-            raise ProviderError("OPENAI_API_KEY is not set.")
+    @lru_cache(maxsize=32)
+    def _client(api_key: str) -> Any:
         from openai import OpenAI
 
         kwargs: dict[str, Any] = {
-            "api_key": settings.openai_api_key,
+            "api_key": api_key,
             "timeout": settings.request_timeout_seconds,
             "max_retries": 0,  # tenacity owns retries, so they stay observable
         }
@@ -219,21 +384,25 @@ class OpenAIProvider:
     @classmethod
     @_retry
     def chat(cls, prompt: str, *, temperature: float, max_output_tokens: int) -> str:
-        try:
-            response = cls._client().chat.completions.create(
-                model=settings.openai_model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temperature,
-                max_tokens=max_output_tokens,
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise _handle(cls, exc) from exc
-        return (response.choices[0].message.content or "").strip()
+        def once(api_key: str) -> str:
+            try:
+                response = cls._client(api_key).chat.completions.create(
+                    model=settings.openai_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=temperature,
+                    max_tokens=max_output_tokens,
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise _handle(cls, exc) from exc
+            return (response.choices[0].message.content or "").strip()
+
+        return cls._with_key(once)
 
     @classmethod
     def chat_stream(cls, prompt: str, *, temperature: float, max_output_tokens: int) -> Iterator[str]:
+        api_key = cls._with_key(lambda key: key)  # pick a healthy key, then stream on it
         try:
-            stream = cls._client().chat.completions.create(
+            stream = cls._client(api_key).chat.completions.create(
                 model=settings.openai_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=temperature,
@@ -252,40 +421,35 @@ class OpenAIProvider:
     def embed_batch(cls, texts: list[str], task_type: str) -> list[list[float]]:
         # OpenAI has no task_type; asymmetric query/document embedding is Gemini-only.
         del task_type
-        try:
-            response = cls._client().embeddings.create(
-                model=settings.openai_embed_model,
-                input=texts,
-                dimensions=settings.embed_dim,
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise _handle(cls, exc) from exc
-        return [_l2_normalise(list(item.embedding)) for item in response.data]
+
+        def once(api_key: str) -> list[list[float]]:
+            try:
+                response = cls._client(api_key).embeddings.create(
+                    model=settings.openai_embed_model,
+                    input=texts,
+                    dimensions=settings.embed_dim,
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise _handle(cls, exc) from exc
+            return [_l2_normalise(list(item.embedding)) for item in response.data]
+
+        return cls._with_key(once)
 
 
 # ── Gemini ────────────────────────────────────────────────────────────────────
-class GeminiProvider:
+class GeminiProvider(_PooledProvider):
     name = "gemini"
 
-    @classmethod
-    def reset_client(cls) -> None:
-        cls._client.cache_clear()
-
     @staticmethod
-    @lru_cache
-    def _client() -> Any:
-        if not settings.google_api_key:
-            raise ProviderError("GOOGLE_API_KEY is not set.")
+    @lru_cache(maxsize=32)
+    def _client(api_key: str) -> Any:
         from google import genai
         from google.genai import types
 
         http_options: dict[str, Any] = {"timeout": settings.request_timeout_seconds * 1000}
         if settings.gemini_base_url:
             http_options["base_url"] = settings.gemini_base_url
-        return genai.Client(
-            api_key=settings.google_api_key,
-            http_options=types.HttpOptions(**http_options),
-        )
+        return genai.Client(api_key=api_key, http_options=types.HttpOptions(**http_options))
 
     @staticmethod
     def _config(temperature: float, max_output_tokens: int) -> Any:
@@ -310,20 +474,24 @@ class GeminiProvider:
     @classmethod
     @_retry
     def chat(cls, prompt: str, *, temperature: float, max_output_tokens: int) -> str:
-        try:
-            response = cls._client().models.generate_content(
-                model=settings.gemini_chat_model,
-                contents=prompt,
-                config=cls._config(temperature, max_output_tokens),
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise _handle(cls, exc) from exc
-        return (response.text or "").strip()
+        def once(api_key: str) -> str:
+            try:
+                response = cls._client(api_key).models.generate_content(
+                    model=settings.gemini_chat_model,
+                    contents=prompt,
+                    config=cls._config(temperature, max_output_tokens),
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise _handle(cls, exc) from exc
+            return (response.text or "").strip()
+
+        return cls._with_key(once)
 
     @classmethod
     def chat_stream(cls, prompt: str, *, temperature: float, max_output_tokens: int) -> Iterator[str]:
+        api_key = cls._with_key(lambda key: key)
         try:
-            for chunk in cls._client().models.generate_content_stream(
+            for chunk in cls._client(api_key).models.generate_content_stream(
                 model=settings.gemini_chat_model,
                 contents=prompt,
                 config=cls._config(temperature, max_output_tokens),
@@ -338,19 +506,29 @@ class GeminiProvider:
     def embed_batch(cls, texts: list[str], task_type: str) -> list[list[float]]:
         from google.genai import types
 
-        try:
-            response = cls._client().models.embed_content(
-                model=settings.gemini_embed_model,
-                contents=texts,
-                config=types.EmbedContentConfig(
-                    task_type=task_type,
-                    output_dimensionality=settings.embed_dim,
-                ),
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise _handle(cls, exc) from exc
-        return [_l2_normalise(list(item.values)) for item in response.embeddings]
+        def once(api_key: str) -> list[list[float]]:
+            try:
+                response = cls._client(api_key).models.embed_content(
+                    model=settings.gemini_embed_model,
+                    contents=texts,
+                    config=types.EmbedContentConfig(
+                        task_type=task_type,
+                        output_dimensionality=settings.embed_dim,
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise _handle(cls, exc) from exc
+            return [_l2_normalise(list(item.values)) for item in response.embeddings]
 
+        # Safe to rotate: same model, same vector space. Only PROVIDER changes would
+        # corrupt retrieval - see embed_batch() below.
+        return cls._with_key(once)
+
+
+OPENAI_KEYS = KeyPool("openai", settings.openai_key_list)
+GEMINI_KEYS = KeyPool("gemini", settings.google_key_list)
+OpenAIProvider.pool = OPENAI_KEYS
+GeminiProvider.pool = GEMINI_KEYS
 
 PROVIDERS: dict[str, Any] = {"openai": OpenAIProvider, "gemini": GeminiProvider}
 
@@ -461,6 +639,11 @@ def provider_health() -> dict[str, str]:
     return {
         name: ("cooling down" if _circuit_open(name) else "ok") for name in chat_provider_names()
     }
+
+
+def key_pool_status() -> dict[str, object]:
+    """Key counts and cooldowns for /api/ready. Never includes key material."""
+    return {name: pool.status() for name, pool in (("openai", OPENAI_KEYS), ("gemini", GEMINI_KEYS)) if pool}
 
 
 def chat_stream(

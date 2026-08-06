@@ -1,5 +1,7 @@
 """Provider routing: chat may fail over, embeddings may not."""
 
+import json
+
 import pytest
 
 from app.core import llm
@@ -337,3 +339,220 @@ def test_warmup_never_raises_and_reports_a_dead_provider(monkeypatch):
     assert "warm in" in report["gemini"]
     # A provider that is dead at boot is skipped on the first real request too.
     assert llm.provider_health()["openai"] == "cooling down"
+
+
+# ── rotating key pool ─────────────────────────────────────────────────────────
+def _pool(monkeypatch, provider, keys):
+    pool = llm.KeyPool(provider.name, keys)
+    monkeypatch.setattr(provider, "pool", pool)
+    return pool
+
+
+def test_a_spent_key_hands_over_to_the_next_one(monkeypatch):
+    """Ten free keys is ten times the allowance - if the pool actually rotates."""
+    pool = _pool(monkeypatch, llm.GeminiProvider, [f"key-{i}" for i in range(1, 6)])
+    used: list[str] = []
+
+    def call(api_key: str) -> str:
+        used.append(api_key)
+        if api_key in ("key-1", "key-2"):
+            raise llm._QuotaExhausted("429 quota exceeded")
+        return "ALLOW"
+
+    assert llm.GeminiProvider._with_key(call) == "ALLOW"
+    assert used == ["key-1", "key-2", "key-3"], "must walk the pool in order"
+    assert pool.available() == [2, 3, 4], "spent keys are rested, the rest stay available"
+
+
+def test_the_next_call_starts_from_a_healthy_key(monkeypatch):
+    pool = _pool(monkeypatch, llm.GeminiProvider, ["a", "b", "c"])
+    pool.rest(0, "quota_exhausted")
+    used: list[str] = []
+    llm.GeminiProvider._with_key(lambda k: used.append(k) or "ok")
+    assert "a" not in used, "a resting key must not be tried again while it rests"
+
+
+def test_all_keys_down_raises_rather_than_pretending(monkeypatch):
+    _pool(monkeypatch, llm.GeminiProvider, ["a", "b"])
+
+    def dead(api_key: str):
+        raise llm._QuotaExhausted("429 quota exceeded")
+
+    with pytest.raises(ProviderError):
+        llm.GeminiProvider._with_key(dead)
+
+
+def test_cooldown_length_matches_the_failure(monkeypatch):
+    pool = _pool(monkeypatch, llm.GeminiProvider, ["a", "b", "c", "d"])
+    for index, reason in enumerate(["rate_limited", "quota_exhausted", "fatal"]):
+        pool.rest(index, reason)
+    resting = {r["key"]: r for r in pool.status()["resting"]}
+    assert resting["#1"]["retry_in_seconds"] <= 60, "a per-minute limit rests for a minute"
+    assert resting["#2"]["retry_in_seconds"] > 600, "a daily allowance rests for much longer"
+    assert resting["#3"]["retry_in_seconds"] > 600, "a dead key is not worth re-trying soon"
+
+
+def test_a_key_that_recovers_is_revived(monkeypatch):
+    pool = _pool(monkeypatch, llm.GeminiProvider, ["a", "b"])
+    pool.rest(0, "rate_limited")
+    llm.GeminiProvider._with_key(lambda k: "ok")   # succeeds on "b"
+    assert 1 in pool.available()
+
+
+def test_every_key_resting_still_makes_one_last_attempt(monkeypatch):
+    """Refusing to try at all would turn a stale cooldown into an outage."""
+    pool = _pool(monkeypatch, llm.GeminiProvider, ["a", "b"])
+    pool.rest(0, "fatal")
+    pool.rest(1, "fatal")
+    assert pool.available() == []
+    assert llm.GeminiProvider._with_key(lambda k: "ok") == "ok"
+
+
+def test_status_never_leaks_key_material(monkeypatch):
+    secret = "AIzaSyVERYSECRETKEYMATERIAL123"
+    pool = _pool(monkeypatch, llm.GeminiProvider, [secret, "other"])
+    pool.rest(0, "quota_exhausted")
+    serialised = json.dumps(pool.status())
+    assert secret not in serialised
+    assert secret[:-4] not in serialised
+    assert pool.fingerprint(secret) == f"…{secret[-4:]}"
+    assert len(pool.fingerprint(secret)) == 5, "four characters is enough to tell keys apart"
+
+
+def test_key_lists_are_parsed_and_deduplicated():
+    from app.config import Settings
+
+    parsed = Settings._split_keys("a, b ,\nc", "b, d")
+    assert parsed == ["a", "b", "c", "d"], "order preserved, duplicates dropped"
+    assert Settings._split_keys('"quoted"', "") == ["quoted"]
+    assert Settings._split_keys("", "") == []
+
+
+def test_a_single_key_still_works(monkeypatch):
+    """The plural variable is optional; nobody's existing setup should break."""
+    from app.config import Settings
+
+    s = Settings(google_api_key="solo", google_api_keys="")
+    assert s.google_key_list == ["solo"]
+
+
+def test_embeddings_rotate_keys_because_the_model_is_unchanged(monkeypatch):
+    """Rotating KEYS keeps the same vector space. Rotating PROVIDERS would not - that
+    remains forbidden, and is covered by test_embeddings_never_fall_over."""
+    pool = _pool(monkeypatch, llm.GeminiProvider, ["k1", "k2"])
+    seen: list[str] = []
+
+    def once(api_key: str):
+        seen.append(api_key)
+        if api_key == "k1":
+            raise llm._QuotaExhausted("429")
+        return [[0.0] * 768]
+
+    assert llm.GeminiProvider._with_key(once) == [[0.0] * 768]
+    assert seen == ["k1", "k2"]
+    assert pool.available() == [1]
+
+
+# ── round-robin rotation ──────────────────────────────────────────────────────
+def test_keys_are_used_in_a_cycle_and_wrap_around(monkeypatch):
+    """Ten keys, ten calls, ten different keys - then back to the first.
+
+    Sticky selection would send every call to key #1 until it hit its per-minute
+    ceiling, eat a 429, and repeat with key #2. Spreading the calls means the ceiling is
+    never reached at all.
+    """
+    pool = _pool(monkeypatch, llm.GeminiProvider, [f"k{i}" for i in range(1, 11)])
+    used = [llm.GeminiProvider._with_key(lambda key: key) for _ in range(10)]
+    assert used == [f"k{i}" for i in range(1, 11)], f"expected one full cycle, got {used}"
+
+    wrapped = [llm.GeminiProvider._with_key(lambda key: key) for _ in range(3)]
+    assert wrapped == ["k1", "k2", "k3"], "after the last key it must start again at the first"
+    assert pool.available() == list(range(10)), "a healthy cycle rests nobody"
+
+
+def test_the_cycle_skips_resting_keys_and_still_wraps(monkeypatch):
+    pool = _pool(monkeypatch, llm.GeminiProvider, ["a", "b", "c", "d"])
+    pool.rest(1, "quota_exhausted")   # "b" is spent
+    used = [llm.GeminiProvider._with_key(lambda key: key) for _ in range(6)]
+    assert "b" not in used
+    assert used == ["a", "c", "d", "a", "c", "d"], f"expected a 3-key cycle, got {used}"
+
+
+def test_load_is_spread_evenly_across_the_pool(monkeypatch):
+    """The point of the cycle: no single key carries a disproportionate share."""
+    from collections import Counter
+
+    _pool(monkeypatch, llm.GeminiProvider, [f"k{i}" for i in range(1, 11)])
+    counts = Counter(llm.GeminiProvider._with_key(lambda key: key) for _ in range(100))
+    assert len(counts) == 10
+    assert set(counts.values()) == {10}, f"uneven distribution: {counts}"
+
+
+def test_rotation_survives_a_key_dying_mid_cycle(monkeypatch):
+    pool = _pool(monkeypatch, llm.GeminiProvider, ["a", "b", "c"])
+    dead = {"b"}
+
+    def call(api_key: str) -> str:
+        if api_key in dead:
+            raise llm._QuotaExhausted("429")
+        return api_key
+
+    used = [llm.GeminiProvider._with_key(call) for _ in range(5)]
+    assert "b" not in [u for u in used]
+    assert pool.available() == [0, 2]
+    assert used == ["a", "c", "a", "c", "a"], f"cycle should close over the survivors, got {used}"
+
+
+# ── the cycle adapts to any pool size ─────────────────────────────────────────
+@pytest.mark.parametrize("size", [1, 2, 3, 5, 7, 10, 13, 25, 50])
+def test_the_cycle_fits_whatever_number_of_keys_you_configure(size, monkeypatch):
+    """Nothing assumes ten. One key, thirteen, fifty - each cycles and wraps."""
+    _pool(monkeypatch, llm.GeminiProvider, [f"k{i}" for i in range(size)])
+    used = [llm.GeminiProvider._with_key(lambda key: key) for _ in range(size * 2)]
+    expected = [f"k{i}" for i in range(size)] * 2
+    assert used == expected, f"pool of {size} did not cycle cleanly"
+
+
+@pytest.mark.parametrize("size", [1, 4, 9, 17])
+def test_load_stays_even_at_any_pool_size(size, monkeypatch):
+    from collections import Counter
+
+    _pool(monkeypatch, llm.GeminiProvider, [f"k{i}" for i in range(size)])
+    counts = Counter(llm.GeminiProvider._with_key(lambda key: key) for _ in range(size * 20))
+    assert len(counts) == size
+    assert set(counts.values()) == {20}, f"uneven across {size} keys: {counts}"
+
+
+def test_the_cursor_is_not_tied_to_how_many_keys_are_healthy(monkeypatch):
+    """Shrinking the healthy set must not trap the cursor in a narrow range.
+
+    Wrapping the counter modulo the *healthy* count meant that after most keys went
+    quiet the cursor lived in 0-2, and stayed lopsided even after they recovered.
+    """
+    from collections import Counter
+
+    pool = _pool(monkeypatch, llm.GeminiProvider, [f"k{i}" for i in range(10)])
+
+    for index in range(3, 10):          # only k0, k1, k2 remain healthy
+        pool.rest(index, "quota_exhausted")
+    for _ in range(9):
+        llm.GeminiProvider._with_key(lambda key: key)
+
+    for index in range(3, 10):          # everyone recovers
+        pool.revive(index)
+
+    counts = Counter(llm.GeminiProvider._with_key(lambda key: key) for _ in range(100))
+    assert len(counts) == 10, f"only {len(counts)} keys used after recovery: {counts}"
+    assert max(counts.values()) - min(counts.values()) <= 1, f"lopsided: {counts}"
+
+
+def test_a_pool_of_one_key_still_works(monkeypatch):
+    """The common case: somebody sets a single GOOGLE_API_KEY and nothing else."""
+    _pool(monkeypatch, llm.GeminiProvider, ["solo"])
+    assert [llm.GeminiProvider._with_key(lambda k: k) for _ in range(5)] == ["solo"] * 5
+
+
+def test_an_empty_pool_fails_with_a_clear_message(monkeypatch):
+    _pool(monkeypatch, llm.GeminiProvider, [])
+    with pytest.raises(ProviderError, match="No API key configured"):
+        llm.GeminiProvider._with_key(lambda k: k)

@@ -32,7 +32,12 @@ async def ready(response: Response) -> ReadyResponse:
         points = 0
     if points == 0:
         response.status_code = 503
-    from app.core.llm import chat_provider_names, embedding_fingerprint, provider_health
+    from app.core.llm import (
+        chat_provider_names,
+        embedding_fingerprint,
+        key_pool_status,
+        provider_health,
+    )
 
     fingerprint = embedding_fingerprint()
     return ReadyResponse(
@@ -42,6 +47,7 @@ async def ready(response: Response) -> ReadyResponse:
         documents=len(registry.all_documents()),
         chat_providers=chat_provider_names(),
         provider_health=provider_health(),
+        key_pools=key_pool_status(),
         embed_provider=str(fingerprint["embed_provider"]),
         embed_model=str(fingerprint["embed_model"]),
     )
